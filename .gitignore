@@ -11,4 +11,5 @@ build/
 .virtualenv/
 
 app.log\
-*.zst
+
+*.tar.zst
