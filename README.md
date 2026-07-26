@@ -1,22 +1,22 @@
-# Music Downloader
+# Youtube Music Downloader
 
-Basit bir YouTube müzik arama ve indirme uygulaması.(AI yardımıyla yapıldı.)
+Basic music downloader with youtube search.(Made with AI assistant.)
 
-Amaç; terminal kullanmadan şarkı aramak, dinlemek ve MP3 olarak indirmektir.
+Purpose; search, listen and download songs with gui.
 
-## Özellikler
+## Features
 
-- YouTube üzerinde arama
-- Sonuçları listeleme
-- MPV ile önizleme
-- MP3 indirme (yt-dlp + ffmpeg)
-- Kapak resmi ekleme
-- Metadata gömme
-- İndirme klasörü seçebilme
-- M3U playlist dosyasını otomatik güncelleme
-- İndirilen dosyayı MusicBrainz Picard ile açma
+- Search on Youtube
+- Lists results
+- Preview with MPV
+- MP3 download (yt-dlp + ffmpeg)
+- Fetch cover from youtube video
+- Metadata inject
+- Choose download path
+- Make and refresh m3u file after tag
+- Tag downloaded file with MusicbrainzPicard
 
-## Gereksinimler
+## Requirements
 
 - Python 3.11+
 - PySide6
@@ -31,12 +31,18 @@ Arch Linux:
 sudo pacman -S python python-pyside6 ffmpeg mpv picard yt-dlp
 ```
 
-## Çalıştırma
+## Run or install
 
 ```bash
 python src/main.py
 ```
 
-## Lisans
+veya kurulum ile:
+
+```bash
+makepkg -si
+```
+
+## Licanse
 
 MIT
