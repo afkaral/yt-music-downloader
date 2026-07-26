@@ -10,4 +10,5 @@ build/
 .venv/
 .virtualenv/
 
-app.log
+app.log\
+*.zst
