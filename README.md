@@ -40,6 +40,8 @@ python src/main.py
 installation:
 
 ```bash
+git clone https://github.com/afkaral/yu-music-downloader.git
+cd yt-music-downloader/
 makepkg -si
 ```
 
