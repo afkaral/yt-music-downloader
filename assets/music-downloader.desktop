@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=Music Downloader
+GenericName=Music Downloader
+Comment=Search and download music from YouTube
+Exec=/usr/bin/music-downloader
+TryExec=/usr/bin/music-downloader
+Icon=music-downloader
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+StartupNotify=true

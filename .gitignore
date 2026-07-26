@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+
+main.build/
+music-downloader/
+dist/
+build/
+
+.venv/
+.virtualenv/
+
+app.log
