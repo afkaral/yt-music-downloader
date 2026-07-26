@@ -31,13 +31,7 @@ Arch Linux:
 sudo pacman -S python python-pyside6 ffmpeg mpv picard yt-dlp
 ```
 
-## Run or install
-
-```bash
-python src/main.py
-```
-
-installation:
+## Installation
 
 ```bash
 git clone https://github.com/afkaral/yu-music-downloader.git
