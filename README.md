@@ -37,7 +37,7 @@ sudo pacman -S python python-pyside6 ffmpeg mpv picard yt-dlp
 python src/main.py
 ```
 
-veya kurulum ile:
+installation:
 
 ```bash
 makepkg -si
