@@ -10,9 +10,24 @@ def load_config():
 
     if not CONFIG_FILE.exists():
         save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG
 
-    with open(CONFIG_FILE, "r", encoding="utf8") as f:
-        return json.load(f)
+    try:
+        with open(CONFIG_FILE, "r", encoding="utf8") as f:
+            config = json.load(f)
+
+        merged_config = DEFAULT_CONFIG.copy()
+        for key, value in config.items():
+            merged_config[key] = value
+
+        if merged_config != config:
+            save_config(merged_config)
+        
+        return merged_config
+    except (json.JSONDecodeError, Exception):
+        print("Warning: Corrupted config file detected. Resetting to default.")
+        save_config(DEFAULT_CONFIG)
+        return DEFAULT_CONFIG
 
 def find_downloaded_file(output):
     for line in output.splitlines():

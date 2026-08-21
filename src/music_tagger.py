@@ -1,6 +1,7 @@
+# src/music_tagger.py
 #!/usr/bin/env python3
 """
-MusicBrainz Audio Tagger - Picard alternatifi CLI aracı
+MusicBrainz Audio Tagger
 AcoustID fingerprint + MusicBrainz metadata + Cover Art Archive
 """
 
@@ -10,15 +11,14 @@ import json
 import time
 import argparse
 import logging
-from pathlib import Path
 from typing import Optional, Dict, List, Tuple
 import requests
 import subprocess
 import shutil
-import mutagen
+
 from mutagen.id3 import (
     ID3, TIT2, TPE1, TALB, TDRC, TDOR, TRCK, APIC, TPE2, TCON, TPOS,
-    TPUB, TSRC, TMED, TSOP, TXXX, UFID, COMM, TLAN
+    TPUB, TSRC, TMED, TSOP, TXXX
 )
 from mutagen.flac import FLAC, Picture
 from mutagen.mp4 import MP4, MP4Cover
@@ -26,56 +26,73 @@ from mutagen.oggvorbis import OggVorbis
 
 
 class MusicTagger:
-    """MusicBrainz tabanlı müzik etiketleyici"""
+    """MusicBrainz-based music tagger"""
+    
+    RATE_LIMIT_ACOUSTID = 0.33  # 3 req/sec
+    RATE_LIMIT_MB = 1.0  # 1 req/sec
+    SUPPORTED_FORMATS = {'.mp3', '.flac', '.ogg', '.oga', '.m4a', '.mp4', '.m4b', '.m4p'}
     
     def __init__(self, user_agent: str = "MusicTagger/1.0", logger=None, api_key: str = None):
-        self.api_key = api_key or 'v8pQ6oyB'  # Fallback to Picard's key
+        self.api_key = api_key or 'v8pQ6oyB'
         self.user_agent = user_agent
         self.mb_base = "https://musicbrainz.org/ws/2"
         self.caa_base = "https://coverartarchive.org"
         self.session = requests.Session()
         self.session.headers.update({'User-Agent': user_agent})
         self.logger = logger or logging.getLogger(__name__)
-        
+    
+    def _api_call(self, url: str, params: dict = None, data: dict = None, timeout: int = 10, rate_limit: float = 0) -> Optional[Dict]:
+        """Generic API call handler with rate limiting and error logging"""
+        try:
+            if rate_limit:
+                time.sleep(rate_limit)
+            
+            if data:
+                response = self.session.post(url, data=data, timeout=timeout)
+            else:
+                response = self.session.get(url, params=params, timeout=timeout)
+            
+            response.raise_for_status()
+            return response.json() if response.text else None
+        except requests.RequestException as e:
+            self.logger.debug(f"API call failed: {url} - {e}")
+            return None
+    
     def get_fingerprint(self, filepath: str) -> Optional[Tuple[str, int]]:
-        """Dosyanın AcoustID parmak izini al (fpcalc kullanarak)"""
+        """Extract AcoustID fingerprint using fpcalc binary"""
         fpcalc = shutil.which('fpcalc')
         if not fpcalc:
-            self.logger.error("fpcalc bulunamadı (libchromaprint-tools gerekli)")
+            self.logger.error("fpcalc binary not found (install chromaprint)")
             return None
         
         try:
             result = subprocess.run(
                 [fpcalc, '-json', '-length', '120', filepath],
-                capture_output=True,
-                text=True,
-                timeout=30
+                capture_output=True, text=True, timeout=30
             )
             
-            if result.returncode in (0, 3):  # 0=success, 3=decoding errors but fingerprint ok
+            if result.returncode in (0, 3):
                 data = json.loads(result.stdout)
                 fingerprint = data.get('fingerprint')
                 duration = int(data.get('duration', 0))
                 if fingerprint and duration:
                     return fingerprint, duration
             else:
-                self.logger.error(f"fpcalc hatası: {result.stderr}")
+                self.logger.error(f"fpcalc error: {result.stderr}")
         except subprocess.TimeoutExpired:
-            self.logger.error("fpcalc zaman aşımı")
+            self.logger.error("fpcalc execution timed out")
         except Exception as e:
-            self.logger.error(f"Parmak izi alınamadı: {e}")
+            self.logger.error(f"Failed to generate fingerprint: {e}")
         
         return None
     
     def lookup_acoustid(self, filepath: str) -> Optional[Dict]:
-        """AcoustID ile MusicBrainz'de ara"""
+        """Query AcoustID service for matching MusicBrainz metadata"""
         result = self.get_fingerprint(filepath)
         if not result:
             return None
-            
-        fingerprint, duration = result
         
-        # AcoustID API'ye direkt istek at
+        fingerprint, duration = result
         url = 'https://api.acoustid.org/v2/lookup'
         params = {
             'client': self.api_key,
@@ -84,644 +101,502 @@ class MusicTagger:
             'duration': str(duration)
         }
         
-        try:
-            time.sleep(0.33)  # AcoustID rate limit (3 req/sec)
-            response = self.session.post(url, data=params, timeout=10)
-            response.raise_for_status()
-            data = response.json()
-            
-            if data.get('status') == 'ok' and data.get('results'):
-                # En yüksek skorlu sonucu al
-                best_match = max(data['results'], key=lambda x: x.get('score', 0))
-                if best_match.get('score', 0) > 0.5:  # %50'den yüksek eşleşme
-                    return best_match
-        except Exception as e:
-            self.logger.error(f"AcoustID API hatası: {e}")
+        data = self._api_call(url, data=params, rate_limit=self.RATE_LIMIT_ACOUSTID)
+        if data and data.get('status') == 'ok' and data.get('results'):
+            best_match = max(data['results'], key=lambda x: x.get('score', 0))
+            if best_match.get('score', 0) > 0.5:
+                return best_match
         
         return None
     
-    def get_musicbrainz_release(self, release_id: str) -> Optional[Dict]:
-        """MusicBrainz'den release bilgilerini al"""
-        url = f"{self.mb_base}/release/{release_id}"
-        params = {
-            'fmt': 'json',
-            'inc': 'artists+recordings+release-groups+labels+media+isrcs+artist-credits'
-        }
-        
-        try:
-            time.sleep(1)  # MusicBrainz rate limit (1 request/second)
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.error(f"MusicBrainz release hatası: {e}")
-            return None
-    
-    def get_musicbrainz_artist(self, artist_id: str) -> Optional[Dict]:
-        """MusicBrainz'den artist bilgilerini al"""
-        url = f"{self.mb_base}/artist/{artist_id}"
+    def get_musicbrainz_data(self, entity: str, entity_id: str, inc: str = '') -> Optional[Dict]:
+        """Fetch data from MusicBrainz API for specified entity type"""
+        url = f"{self.mb_base}/{entity}/{entity_id}"
         params = {'fmt': 'json'}
-        
-        try:
-            time.sleep(1)
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.debug(f"Artist bilgisi alınamadı: {e}")
-            return None
+        if inc:
+            params['inc'] = inc
+        return self._api_call(url, params=params, rate_limit=self.RATE_LIMIT_MB)
     
-    def get_musicbrainz_release_group(self, rg_id: str) -> Optional[Dict]:
-        """Release group'tan orijinal tarih al"""
-        url = f"{self.mb_base}/release-group/{rg_id}"
-        params = {'fmt': 'json', 'inc': 'releases'}
-        
-        try:
-            time.sleep(1)
-            response = self.session.get(url, params=params)
-            response.raise_for_status()
-            return response.json()
-        except Exception as e:
-            self.logger.debug(f"Release group hatası: {e}")
-            return None
-    
-    def get_cover_art(self, release_id: str) -> List[Tuple[bytes, str]]:
-        """Cover Art Archive'den albüm kapaklarını indir"""
-        covers = []
-        
-        # JSON endpoint'den kapak listesini al
-        try:
-            url = f"{self.caa_base}/release/{release_id}"
-            response = self.session.get(url, timeout=10)
-            if response.status_code == 200:
-                data = response.json()
+    def get_cover_art(self, release_id: str, release_group_id: str = None, artist: str = None, title: str = None) -> List[Tuple[bytes, str]]:
+        """Download front cover image from Cover Art Archive with fallback to release-group"""
+        headers = {'User-Agent': self.user_agent}
+
+        endpoints = [f"{self.caa_base}/release/{release_id}"]
+        if release_group_id:
+            endpoints.append(f"{self.caa_base}/release-group/{release_group_id}")
+
+        for url in endpoints:
+            try:
+                self.logger.info(f"Checking {url} for cover art...")
+                data = self._api_call(url, timeout=10)
+            
+                if data and 'images' in data:
+                    for image in data['images']:
+                        if image.get('front', False) or len(data['images']) == 1:
+                            img_url = image.get('image') or image.get('thumbnails', {}).get('large')
+                            if img_url:
+                                self.logger.info(f"Downloading cover art from {img_url}...")
+                                res = self.session.get(img_url, headers=headers, allow_redirects=True, timeout=15)
+                                if res.status_code == 200:
+                                    mime_type = res.headers.get('content-type', 'image/jpeg')
+                                    self.logger.info("Cover art downloaded successfully from CAA.")
+                                    return [(res.content, mime_type)]
+                                else:
+                                    self.logger.warning(f"Cover art download failed with status code {res.status_code}")
+            except Exception as e:
+                self.logger.debug(f"Cover art download error for {url}: {e}")
+                continue
+
+        direct_urls = [
+            f"{self.caa_base}/release/{release_id}/front",
+            f"{self.caa_base}/release/{release_id}/front-500"
+        ]
+        if release_group_id:
+            direct_urls.append(f"{self.caa_base}/release-group/{release_group_id}/front")
+
+        for direct_url in direct_urls:
+            try:
+                self.logger.info(f"Downloading cover art from direct URL: {direct_url}")
+                res = self.session.get(direct_url, headers=headers, allow_redirects=True, timeout=10)
+                if res.status_code == 200:
+                    mime_type = res.headers.get('content-type', 'image/jpeg')
+                    self.logger.info("Cover art downloaded successfully from direct CAA URL.")
+                    return [(res.content, mime_type)]
+            except Exception as e:
+                self.logger.debug(f"Cover art download error for direct URL: {e}")
+
+        if artist and title:
+            try:
+                query = f"{artist} {title}"
+                self.logger.info(f"Caa empty. Searching iTunes API for: {query}")
+                itunes_url = "https://itunes.apple.com/search"
+                params = {"term": query, "entity": "song", "limit": 1}
+                res = self.session.get(itunes_url, params=params, timeout=10)
+
+                if res.status_code == 200:
+                    result = res.json().get('results', [])
+                    if result:
+                        artwork_url = result[0].get('artworkUrl100', '').replace('100x100bb', '600x600bb')
+                        if artwork_url:
+                            self.logger.info(f"Cover art URL found in iTunes API: {artwork_url}")
+                            img_res = self.session.get(artwork_url, headers=headers, timeout=10)
+                            if img_res.status_code == 200:
+                                mime_type = img_res.headers.get('Content-Type', 'image/jpeg')
+                                self.logger.info("Cover art downloaded successfully from iTunes API")
+                                return [(img_res.content, mime_type)]
+                        else:
+                            self.logger.error("Failed to download cover art from iTunes API")
+                    else:
+                        self.logger.warning("No results found in iTunes API")
                 
-                for image in data.get('images', []):
-                    if image.get('front'):  # Front cover
-                        # Thumbnails yerine orjinal boyutu kullan
-                        img_url = image.get('image')
-                        if img_url:
-                            try:
-                                img_response = self.session.get(img_url, timeout=15)
-                                if img_response.status_code == 200:
-                                    mime_type = img_response.headers.get('content-type', 'image/jpeg')
-                                    covers.append((img_response.content, mime_type))
-                            except:
-                                pass
-                        break  # Sadece front cover
-        except Exception as e:
-            self.logger.debug(f"Kapak indirme hatası: {e}")
+            except Exception as e:
+                self.logger.error(f"Error fetching cover art from iTunes API: {e}")
+
         
-        return covers
+        self.logger.warning("No cover art found in Cover Art Archive")
+        return []
     
     def extract_metadata(self, acoustid_result: Dict, release_data: Dict, recording_id: str) -> Dict:
-        """AcoustID ve MusicBrainz verilerinden metadata çıkar"""
-        metadata = {}
+        """Parse AcoustID and MusicBrainz response objects into normalized metadata dict"""
+        metadata = {'acoustid_id': acoustid_result.get('id', '')}
         
-        # AcoustID ID
-        if 'id' in acoustid_result:
-            metadata['acoustid_id'] = acoustid_result['id']
-        
-        # Recording bilgisi
-        if 'recordings' in acoustid_result and acoustid_result['recordings']:
-            recording = acoustid_result['recordings'][0]
-            metadata['title'] = recording.get('title', '')
-            metadata['musicbrainz_recordingid'] = recording.get('id', '')
+        # Track recording metadata
+        recordings = acoustid_result.get('recordings', [])
+        if recordings:
+            recording = recordings[0]
+            metadata.update({
+                'title': recording.get('title', ''),
+                'musicbrainz_recordingid': recording.get('id', '')
+            })
             
-            if 'artists' in recording and recording['artists']:
-                artist = recording['artists'][0]
-                metadata['artist'] = artist.get('name', '')
+            artists = recording.get('artists', [])
+            if artists:
+                artist = artists[0]
                 artist_id = artist.get('id', '')
+                metadata['artist'] = artist.get('name', '')
                 metadata['musicbrainz_artistid'] = artist_id
                 
-                # Artist sort order (API'den detaylı bilgi al)
+                # Retrieve artist sort name
                 if artist_id:
-                    artist_data = self.get_musicbrainz_artist(artist_id)
-                    if artist_data and 'sort-name' in artist_data:
-                        metadata['artistsort'] = artist_data['sort-name']
-                    else:
-                        metadata['artistsort'] = metadata['artist']
+                    artist_data = self.get_musicbrainz_data('artist', artist_id)
+                    metadata['artistsort'] = artist_data.get('sort-name', metadata['artist']) if artist_data else metadata['artist']
                 else:
                     metadata['artistsort'] = metadata['artist']
         
-        # Release bilgisi
+        # Release metadata
         if release_data:
-            metadata['album'] = release_data.get('title', '')
-            metadata['musicbrainz_albumid'] = release_data.get('id', '')
+            metadata.update({
+                'album': release_data.get('title', ''),
+                'musicbrainz_albumid': release_data.get('id', ''),
+                'date': release_data.get('date', ''),
+                'releasecountry': release_data.get('country', ''),
+                'barcode': release_data.get('barcode', '')
+            })
             
-            # Release tarihi (recording date)
-            if 'date' in release_data:
-                metadata['date'] = release_data['date']
+            # Script representation
+            text_rep = release_data.get('text-representation', {})
+            if text_rep.get('script'):
+                metadata['script'] = text_rep['script']
             
-            # Release country
-            if 'country' in release_data:
-                metadata['releasecountry'] = release_data['country']
+            # Record label
+            label_info = release_data.get('label-info', [])
+            if label_info and label_info[0].get('label'):
+                metadata['label'] = label_info[0]['label'].get('name', '')
             
-            # Barcode
-            if 'barcode' in release_data and release_data['barcode']:
-                metadata['barcode'] = release_data['barcode']
+            # Album artist credit
+            artist_credit = release_data.get('artist-credit', [])
+            if artist_credit and artist_credit[0].get('artist'):
+                album_artist = artist_credit[0]['artist']
+                metadata['albumartist'] = album_artist.get('name', '')
+                metadata['musicbrainz_albumartistid'] = album_artist.get('id', '')
+                metadata['albumartistsort'] = album_artist.get('sort-name', metadata['albumartist'])
             
-            # Script
-            if 'text-representation' in release_data:
-                script = release_data['text-representation'].get('script')
-                if script:
-                    metadata['script'] = script
-            
-            # Label
-            if 'label-info' in release_data and release_data['label-info']:
-                for label_info in release_data['label-info']:
-                    if 'label' in label_info and label_info['label']:
-                        metadata['label'] = label_info['label'].get('name', '')
+            # Media & Track structure
+            media = release_data.get('media', [])
+            if media:
+                medium = media[0]
+                metadata['media'] = medium.get('format', '')
+                metadata['discnumber'] = '1'
+                metadata['totaldiscs'] = str(len(media))
+                
+                tracks = medium.get('tracks', [])
+                for idx, track in enumerate(tracks, 1):
+                    track_rec = track.get('recording', {})
+                    if track_rec.get('title') == metadata.get('title') or track_rec.get('id') == recording_id:
+                        metadata['tracknumber'] = str(idx)
+                        metadata['totaltracks'] = str(len(tracks))
+                        metadata['musicbrainz_releasetrackid'] = track.get('id', '')
+                        
+                        isrcs = track_rec.get('isrcs', [])
+                        if isrcs:
+                            metadata['isrc'] = isrcs[0]
                         break
             
-            # Album artist
-            if 'artist-credit' in release_data and release_data['artist-credit']:
-                album_artist = release_data['artist-credit'][0]
-                if 'artist' in album_artist:
-                    metadata['albumartist'] = album_artist['artist'].get('name', '')
-                    metadata['musicbrainz_albumartistid'] = album_artist['artist'].get('id', '')
-                    
-                    # Album artist sort (MusicBrainz'den sort-name kullan)
-                    metadata['albumartistsort'] = album_artist['artist'].get('sort-name', metadata['albumartist'])
-            
-            # Media (disc format)
-            if 'media' in release_data and release_data['media']:
-                medium = release_data['media'][0]
-                if 'format' in medium and medium['format']:
-                    metadata['media'] = medium['format']
-                
-                # Disc number
-                metadata['discnumber'] = '1'
-                metadata['totaldiscs'] = str(len(release_data['media']))
-                
-                # Track bilgisi
-                if 'tracks' in medium:
-                    for idx, track in enumerate(medium['tracks'], 1):
-                        track_recording = track.get('recording', {})
-                        if track_recording.get('title') == metadata.get('title') or \
-                           track_recording.get('id') == recording_id:
-                            metadata['tracknumber'] = str(idx)
-                            metadata['totaltracks'] = str(len(medium['tracks']))
-                            metadata['musicbrainz_releasetrackid'] = track.get('id', '')
-                            
-                            # ISRC
-                            if 'isrcs' in track_recording and track_recording['isrcs']:
-                                metadata['isrc'] = track_recording['isrcs'][0]
-                            break
-            
-            # Release group bilgisi
-            if 'release-group' in release_data:
-                rg = release_data['release-group']
+            # Release group attributes
+            rg = release_data.get('release-group', {})
+            if rg:
                 metadata['musicbrainz_releasegroupid'] = rg.get('id', '')
                 
-                # Primary type
-                if 'primary-type' in rg:
+                if rg.get('primary-type'):
                     metadata['releasetype'] = rg['primary-type'].lower()
                     metadata['genre'] = rg['primary-type']
                 
-                # Release status
-                if 'status' in release_data:
+                if release_data.get('status'):
                     metadata['releasestatus'] = release_data['status'].lower()
                 
-                # Orijinal yayın tarihi (release group'tan)
                 if rg.get('first-release-date'):
                     metadata['originaldate'] = rg['first-release-date']
                     metadata['originalyear'] = rg['first-release-date'].split('-')[0]
         
         return metadata
-    
-    def tag_file(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]] = None) -> bool:
-        """Dosyayı etiketle (MP3, FLAC, OGG, M4A destekli)"""
-        try:
-            ext = os.path.splitext(filepath)[1].lower()
-            
-            if ext == '.mp3':
-                return self._tag_mp3(filepath, metadata, covers)
-            elif ext == '.flac':
-                return self._tag_flac(filepath, metadata, covers)
-            elif ext in ['.ogg', '.oga']:
-                return self._tag_ogg(filepath, metadata, covers)
-            elif ext in ['.m4a', '.mp4', '.m4b', '.m4p']:
-                return self._tag_m4a(filepath, metadata, covers)
-            else:
-                self.logger.error(f"Desteklenmeyen format: {ext}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Etiketleme hatası: {e}")
-            import traceback
-            self.logger.debug(traceback.format_exc())
-            return False
-    
+
     def _tag_mp3(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]]) -> bool:
-        """MP3 dosyasını etiketle"""
+        """Apply ID3 tags to MP3 container"""
         try:
             audio = ID3(filepath)
-        except:
+        except Exception:
             audio = ID3()
         
-        # Temel taglar
-        if 'title' in metadata:
-            audio.add(TIT2(encoding=3, text=metadata['title']))
-        if 'artist' in metadata:
-            audio.add(TPE1(encoding=3, text=metadata['artist']))
-        if 'album' in metadata:
-            audio.add(TALB(encoding=3, text=metadata['album']))
-        if 'albumartist' in metadata:
-            audio.add(TPE2(encoding=3, text=metadata['albumartist']))
-        if 'date' in metadata:
-            audio.add(TDRC(encoding=3, text=metadata['date']))
-        if 'originaldate' in metadata:
-            audio.add(TDOR(encoding=3, text=metadata['originaldate']))
-        if 'genre' in metadata:
-            audio.add(TCON(encoding=3, text=metadata['genre']))
-        
-        # Track/Disc numbers
-        if 'tracknumber' in metadata:
-            track = metadata['tracknumber']
-            if 'totaltracks' in metadata:
-                track = f"{track}/{metadata['totaltracks']}"
+        clean_meta = {}
+        for k, v in metadata.items():
+            if v is not None and str(v).strip() != '':
+                clean_meta[k] = v
+
+        tag_map = {
+            'title': lambda a, v: a.add(TIT2(encoding=3, text=v)),
+            'artist': lambda a, v: a.add(TPE1(encoding=3, text=v)),
+            'album': lambda a, v: a.add(TALB(encoding=3, text=v)),
+            'albumartist': lambda a, v: a.add(TPE2(encoding=3, text=v)),
+            'date': lambda a, v: a.add(TDRC(encoding=3, text=v)),
+            'originaldate': lambda a, v: a.add(TDOR(encoding=3, text=v)),
+            'genre': lambda a, v: a.add(TCON(encoding=3, text=v)),
+            'label': lambda a, v: a.add(TPUB(encoding=3, text=v)),
+            'isrc': lambda a, v: a.add(TSRC(encoding=3, text=v)),
+            'media': lambda a, v: a.add(TMED(encoding=3, text=v)),
+            'albumartistsort': lambda a, v: a.add(TSOP(encoding=3, text=v)),
+        }
+
+        for key, func in tag_map.items():
+            if key in clean_meta:
+                try:
+                    func(audio, clean_meta[key])
+                except Exception as e:
+                    self.logger.warning(f"Error tagging {key}: {e}")
+
+        if 'tracknumber' in clean_meta:
+            track = f"{clean_meta['tracknumber']}/{clean_meta.get('totaltracks', '')}"
             audio.add(TRCK(encoding=3, text=track))
-        
-        if 'discnumber' in metadata:
-            disc = metadata['discnumber']
-            if 'totaldiscs' in metadata:
-                disc = f"{disc}/{metadata['totaldiscs']}"
+
+        if 'discnumber' in clean_meta:
+            disc = f"{clean_meta['discnumber']}/{clean_meta.get('totaldiscs', '')}"
             audio.add(TPOS(encoding=3, text=disc))
-        
-        # Publisher/Label
-        if 'label' in metadata:
-            audio.add(TPUB(encoding=3, text=metadata['label']))
-        
-        # ISRC
-        if 'isrc' in metadata:
-            audio.add(TSRC(encoding=3, text=metadata['isrc']))
-        
-        # Media
-        if 'media' in metadata:
-            audio.add(TMED(encoding=3, text=metadata['media']))
-        
-        # Script (TLAN tag'ı language içindir, script için TXXX kullanılmalı)
-        if 'script' in metadata:
-            audio.add(TXXX(encoding=3, desc='SCRIPT', text=metadata['script']))
-        
-        # Sort orders (Picard TSOP'u album artist sort için kullanıyor)
-        if 'albumartistsort' in metadata:
-            audio.add(TSOP(encoding=3, text=metadata['albumartistsort']))
-        if 'artistsort' in metadata:
-            from mutagen.id3 import TSOP as TSOP_FRAME
-            # Performer sort order için de TSOP kullan (Picard uyumluluğu)
-            audio.add(TXXX(encoding=3, desc='ARTISTSORT', text=metadata['artistsort']))
-        
-        # Original year
-        if 'originalyear' in metadata:
-            audio.add(TXXX(encoding=3, desc='ORIGINALYEAR', text=metadata['originalyear']))
-        
-        # Barcode
-        if 'barcode' in metadata:
-            audio.add(TXXX(encoding=3, desc='BARCODE', text=metadata['barcode']))
-        
-        # Artists (for multi-artist)
-        if 'artist' in metadata:
-            audio.add(TXXX(encoding=3, desc='ARTISTS', text=metadata['artist']))
-        
-        # MusicBrainz IDs
-        if 'musicbrainz_albumid' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Album Id', text=metadata['musicbrainz_albumid']))
-        if 'musicbrainz_artistid' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Artist Id', text=metadata['musicbrainz_artistid']))
-        if 'musicbrainz_albumartistid' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Album Artist Id', text=metadata['musicbrainz_albumartistid']))
-        if 'musicbrainz_releasegroupid' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Release Group Id', text=metadata['musicbrainz_releasegroupid']))
-        if 'musicbrainz_releasetrackid' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Release Track Id', text=metadata['musicbrainz_releasetrackid']))
-        
-        # Release type & status
-        if 'releasetype' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Album Type', text=metadata['releasetype']))
-        if 'releasestatus' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Album Status', text=metadata['releasestatus']))
-        if 'releasecountry' in metadata:
-            audio.add(TXXX(encoding=3, desc='MusicBrainz Album Release Country', text=metadata['releasecountry']))
-        
-        # AcoustID
-        if 'acoustid_id' in metadata:
-            audio.add(TXXX(encoding=3, desc='Acoustid Id', text=metadata['acoustid_id']))
-        
-        # Kapak fotoğrafları
+
+        txxx_map = {
+            'script': 'SCRIPT',
+            'artistsort': 'ARTISTSORT',
+            'originalyear': 'ORIGINALYEAR',
+            'barcode': 'BARCODE',
+            'musicbrainz_albumid': 'MusicBrainz Album Id',
+            'musicbrainz_artistid': 'MusicBrainz Artist Id',
+            'musicbrainz_albumartistid': 'MusicBrainz Album Artist Id',
+            'musicbrainz_releasegroupid': 'MusicBrainz Release Group Id',
+            'musicbrainz_releasetrackid': 'MusicBrainz Release Track Id',
+            'releasetype': 'MusicBrainz Album Type',
+            'releasestatus': 'MusicBrainz Album Status',
+            'releasecountry': 'MusicBraz Album Release Country',
+            'acoustid_id': 'Acoustid Id',
+        }
+
+        for meta_key, desc in txxx_map.items():
+            if meta_key in clean_meta:
+                audio.add(TXXX(encoding=3, desc=desc, text=clean_meta[meta_key]))
+
         if covers:
-            for idx, (cover_data, mime_type) in enumerate(covers):
-                # Mime type'ı düzelt
-                if 'png' in mime_type.lower():
-                    mime = 'image/png'
-                else:
-                    mime = 'image/jpeg'
-                
-                desc = 'Album cover' if idx == 0 else 'Cover'
+            for idx, (data, mime) in enumerate(covers):
                 audio.add(APIC(
                     encoding=3,
-                    mime=mime,
-                    type=3,  # Front cover
-                    desc=desc,
-                    data=cover_data
+                    mime='image/png' if 'png' in mime.lower() else 'image/jpeg',
+                    type=3,
+                    desc='Album cover' if idx == 0 else 'Cover',
+                    data=data
                 ))
-        
+
         audio.save(filepath, v2_version=4)
         return True
-    
+
     def _tag_flac(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]]) -> bool:
-        """FLAC dosyasını etiketle"""
+        """Apply Vorbis comments and embedded pictures to FLAC container"""
         audio = FLAC(filepath)
         
-        # Temel taglar
-        if 'title' in metadata:
-            audio['title'] = metadata['title']
-        if 'artist' in metadata:
-            audio['artist'] = metadata['artist']
-        if 'album' in metadata:
-            audio['album'] = metadata['album']
-        if 'albumartist' in metadata:
-            audio['albumartist'] = metadata['albumartist']
-        if 'date' in metadata:
-            audio['date'] = metadata['date']
-        if 'originaldate' in metadata:
-            audio['originaldate'] = metadata['originaldate']
-        if 'tracknumber' in metadata:
-            audio['tracknumber'] = metadata['tracknumber']
-        if 'totaltracks' in metadata:
-            audio['totaltracks'] = metadata['totaltracks']
-        if 'discnumber' in metadata:
-            audio['discnumber'] = metadata['discnumber']
-        if 'totaldiscs' in metadata:
-            audio['totaldiscs'] = metadata['totaldiscs']
-        if 'genre' in metadata:
-            audio['genre'] = metadata['genre']
-        if 'label' in metadata:
-            audio['label'] = metadata['label']
-        if 'isrc' in metadata:
-            audio['isrc'] = metadata['isrc']
-        if 'media' in metadata:
-            audio['media'] = metadata['media']
-        if 'barcode' in metadata:
-            audio['barcode'] = metadata['barcode']
-        if 'originalyear' in metadata:
-            audio['originalyear'] = metadata['originalyear']
+        keys = [
+            'title', 'artist', 'album', 'albumartist', 'date', 'originaldate',
+            'tracknumber', 'totaltracks', 'discnumber', 'totaldiscs', 'genre',
+            'label', 'isrc', 'media', 'barcode', 'originalyear',
+            'musicbrainz_albumid', 'musicbrainz_artistid', 'musicbrainz_albumartistid',
+            'musicbrainz_releasegroupid', 'musicbrainz_releasetrackid', 'acoustid_id'
+        ]
+        for key in keys:
+            if key in metadata:
+                audio[key] = metadata[key]
         
-        # MusicBrainz tags
-        if 'musicbrainz_albumid' in metadata:
-            audio['musicbrainz_albumid'] = metadata['musicbrainz_albumid']
-        if 'musicbrainz_artistid' in metadata:
-            audio['musicbrainz_artistid'] = metadata['musicbrainz_artistid']
-        if 'musicbrainz_albumartistid' in metadata:
-            audio['musicbrainz_albumartistid'] = metadata['musicbrainz_albumartistid']
-        if 'musicbrainz_releasegroupid' in metadata:
-            audio['musicbrainz_releasegroupid'] = metadata['musicbrainz_releasegroupid']
-        if 'musicbrainz_releasetrackid' in metadata:
-            audio['musicbrainz_releasetrackid'] = metadata['musicbrainz_releasetrackid']
-        if 'acoustid_id' in metadata:
-            audio['acoustid_id'] = metadata['acoustid_id']
-        
-        # Kapak fotoğrafları
         if covers:
             audio.clear_pictures()
-            for idx, (cover_data, mime_type) in enumerate(covers):
-                picture = Picture()
-                picture.type = 3  # Front cover
-                picture.mime = 'image/png' if 'png' in mime_type.lower() else 'image/jpeg'
-                picture.desc = 'Album cover' if idx == 0 else 'Cover'
-                picture.data = cover_data
-                audio.add_picture(picture)
+            for idx, (data, mime) in enumerate(covers):
+                pic = Picture()
+                pic.type = 3
+                pic.mime = 'image/png' if 'png' in mime.lower() else 'image/jpeg'
+                pic.desc = 'Album cover' if idx == 0 else 'Cover'
+                pic.data = data
+                audio.add_picture(pic)
         
         audio.save()
         return True
     
     def _tag_ogg(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]]) -> bool:
-        """OGG Vorbis dosyasını etiketle"""
+        """Apply Vorbis comments and METADATA_BLOCK_PICTURE to OGG container"""
         audio = OggVorbis(filepath)
         
-        # Temel taglar
-        if 'title' in metadata:
-            audio['title'] = metadata['title']
-        if 'artist' in metadata:
-            audio['artist'] = metadata['artist']
-        if 'album' in metadata:
-            audio['album'] = metadata['album']
-        if 'albumartist' in metadata:
-            audio['albumartist'] = metadata['albumartist']
-        if 'date' in metadata:
-            audio['date'] = metadata['date']
-        if 'originaldate' in metadata:
-            audio['originaldate'] = metadata['originaldate']
-        if 'tracknumber' in metadata:
-            audio['tracknumber'] = metadata['tracknumber']
-        if 'genre' in metadata:
-            audio['genre'] = metadata['genre']
-        if 'label' in metadata:
-            audio['label'] = metadata['label']
-        if 'isrc' in metadata:
-            audio['isrc'] = metadata['isrc']
+        keys = [
+            'title', 'artist', 'album', 'albumartist', 'date', 'originaldate',
+            'tracknumber', 'genre', 'label', 'isrc', 'musicbrainz_albumid', 'acoustid_id'
+        ]
+        for key in keys:
+            if key in metadata:
+                audio[key] = metadata[key]
         
-        # MusicBrainz tags
-        if 'musicbrainz_albumid' in metadata:
-            audio['musicbrainz_albumid'] = metadata['musicbrainz_albumid']
-        if 'acoustid_id' in metadata:
-            audio['acoustid_id'] = metadata['acoustid_id']
-        
-        # OGG için kapak FLAC Picture formatında
         if covers:
             import base64
-            for idx, (cover_data, mime_type) in enumerate(covers):
-                picture = Picture()
-                picture.type = 3
-                picture.mime = 'image/png' if 'png' in mime_type.lower() else 'image/jpeg'
-                picture.desc = 'Album cover' if idx == 0 else 'Cover'
-                picture.data = cover_data
-                
-                encoded_data = base64.b64encode(picture.write())
-                audio[f'metadata_block_picture'] = encoded_data.decode('ascii')
-                break  # OGG genelde tek kapak destekler
+            pic = Picture()
+            pic.type = 3
+            pic.mime = 'image/png' if 'png' in covers[0][1].lower() else 'image/jpeg'
+            pic.desc = 'Album cover'
+            pic.data = covers[0][0]
+            audio['metadata_block_picture'] = base64.b64encode(pic.write()).decode('ascii')
         
         audio.save()
         return True
     
     def _tag_m4a(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]]) -> bool:
-        """M4A/MP4 dosyasını etiketle"""
+        """Apply MP4 atoms to M4A container"""
         audio = MP4(filepath)
         
-        # M4A tag mapping
-        if 'title' in metadata:
-            audio['\xa9nam'] = metadata['title']
-        if 'artist' in metadata:
-            audio['\xa9ART'] = metadata['artist']
-        if 'album' in metadata:
-            audio['\xa9alb'] = metadata['album']
-        if 'albumartist' in metadata:
-            audio['aART'] = metadata['albumartist']
-        if 'date' in metadata:
-            audio['\xa9day'] = metadata['date']
-        if 'tracknumber' in metadata and 'totaltracks' in metadata:
-            audio['trkn'] = [(int(metadata['tracknumber']), int(metadata['totaltracks']))]
-        elif 'tracknumber' in metadata:
-            audio['trkn'] = [(int(metadata['tracknumber']), 0)]
+        m4a_map = {
+            'title': '\xa9nam', 'artist': '\xa9ART', 'album': '\xa9alb',
+            'albumartist': 'aART', 'date': '\xa9day', 'genre': '\xa9gen'
+        }
+        
+        for meta_key, tag_key in m4a_map.items():
+            if meta_key in metadata:
+                audio[tag_key] = metadata[meta_key]
+        
+        if 'tracknumber' in metadata:
+            total = int(metadata.get('totaltracks', 0))
+            audio['trkn'] = [(int(metadata['tracknumber']), total)]
+        
         if 'discnumber' in metadata and 'totaldiscs' in metadata:
             audio['disk'] = [(int(metadata['discnumber']), int(metadata['totaldiscs']))]
-        if 'genre' in metadata:
-            audio['\xa9gen'] = metadata['genre']
         
-        # Kapak fotoğrafları
         if covers:
-            cover_list = []
-            for cover_data, mime_type in covers:
-                if 'png' in mime_type.lower():
-                    cover_list.append(MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_PNG))
-                else:
-                    cover_list.append(MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG))
-            audio['covr'] = cover_list
+            audio['covr'] = [
+                MP4Cover(data, imageformat=MP4Cover.FORMAT_PNG if 'png' in mime.lower() else MP4Cover.FORMAT_JPEG)
+                for data, mime in covers
+            ]
         
         audio.save()
         return True
     
+    def tag_file(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]] = None) -> bool:
+        """Dispatch tagging logic based on audio file extension"""
+        try:
+            ext = os.path.splitext(filepath)[1].lower()
+            
+            taggers = {
+                '.mp3': self._tag_mp3,
+                '.flac': self._tag_flac,
+                '.ogg': self._tag_ogg, '.oga': self._tag_ogg,
+                '.m4a': self._tag_m4a, '.mp4': self._tag_m4a, '.m4b': self._tag_m4a, '.m4p': self._tag_m4a
+            }
+            
+            tagger = taggers.get(ext)
+            if not tagger:
+                self.logger.error(f"Unsupported audio format: {ext}")
+                return False
+            
+            return tagger(filepath, metadata, covers or [])
+        
+        except Exception as e:
+            self.logger.error(f"Tagging operation failed: {e}")
+            return False
+    
     def process_file(self, filepath: str, save_cover: bool = False) -> bool:
-        """Tek bir dosyayı işle"""
-        self.logger.info(f"Etiketleme başlatıldı: {os.path.basename(filepath)}")
+        """Execute full pipeline for fingerprinting, fetching metadata, and tagging a file"""
+        self.logger.info(f"Tagging started: {os.path.basename(filepath)}")
         
-        # 1. Parmak izi al
-        self.logger.debug("AcoustID fingerprint alınıyor...")
+        # 1. Lookup Fingerprint
         acoustid_result = self.lookup_acoustid(filepath)
-        
         if not acoustid_result:
-            self.logger.warning("AcoustID eşleşmesi bulunamadı")
+            self.logger.warning("No AcoustID match found")
             return False
         
         score = acoustid_result.get('score', 0)
-        self.logger.info(f"AcoustID eşleşme: %{score*100:.1f}")
+        self.logger.info(f"AcoustID match: {score*100:.1f}%")
         
-        # 2. Release bilgilerini al
+        # 2. Extract release parameters
         release_id = None
         recording_id = None
         
-        if 'recordings' in acoustid_result and acoustid_result['recordings']:
-            recording = acoustid_result['recordings'][0]
-            recording_id = recording.get('id')
+        recordings = acoustid_result.get('recordings', [])
+        if recordings:
+            rec = recordings[0]
+            recording_id = rec.get('id')
             
-            if 'releasegroups' in recording and recording['releasegroups']:
-                for rg in recording['releasegroups']:
-                    if 'releases' in rg and rg['releases']:
-                        release_id = rg['releases'][0]['id']
-                        break
+            for rg in rec.get('releasegroups', []):
+                releases = rg.get('releases', [])
+                if releases:
+                    release_id = releases[0]['id']
+                    break
         
         if not release_id:
-            self.logger.warning("MusicBrainz release bulunamadı")
+            self.logger.warning("No MusicBrainz release found")
             return False
         
-        self.logger.debug(f"MusicBrainz release: {release_id}")
-        release_data = self.get_musicbrainz_release(release_id)
+        release_data = self.get_musicbrainz_data(
+            'release', release_id,
+            'artists+recordings+release-groups+labels+media+isrcs+artist-credits'
+        )
         
         if not release_data:
-            self.logger.error("Release bilgileri alınamadı")
+            self.logger.error("Failed to fetch release metadata")
             return False
         
-        # 3. Metadata hazırla
+        # 3. Consolidate metadata
         metadata = self.extract_metadata(acoustid_result, release_data, recording_id)
         
         if metadata.get('title') and metadata.get('artist'):
-            self.logger.info(f"Bulundu: {metadata['artist']} - {metadata['title']}")
+            self.logger.info(f"Metadata match: {metadata['artist']} - {metadata['title']}")
         
-        # 4. Kapak fotoğraflarını indir
-        covers = self.get_cover_art(release_id)
-        
+        # 4. Fetch cover art
+        rg_id = metadata.get('musicbrainz_releasegroupid')
+        artist_name = metadata.get('artist')
+        track_title = metadata.get('title')
+
+        covers = self.get_cover_art(
+            release_id, 
+            release_group_id=rg_id,
+            artist=artist_name,
+            title=track_title
+        )
         if covers:
-            self.logger.debug(f"{len(covers)} kapak indirildi")
+            self.logger.info(f"{len(covers)} cover image(s) fetched")
             
-            if save_cover and covers:
-                for idx, (cover_data, mime_type) in enumerate(covers):
-                    ext = 'png' if 'png' in mime_type.lower() else 'jpg'
+            if save_cover:
+                for idx, (data, mime) in enumerate(covers):
+                    ext = 'png' if 'png' in mime.lower() else 'jpg'
                     cover_path = os.path.join(
-                        os.path.dirname(filepath),
+                        os.path.dirname(filepath), 
                         f'cover{idx if idx > 0 else ""}.{ext}'
                     )
                     with open(cover_path, 'wb') as f:
-                        f.write(cover_data)
-                    self.logger.info(f"Kapak kaydedildi: {cover_path}")
+                        f.write(data)
+                    self.logger.info(f"Cover image saved: {cover_path}")
         
-        # 5. Dosyayı etiketle
+        # 5. Write metadata tags
         success = self.tag_file(filepath, metadata, covers)
         
         if success:
-            self.logger.info("✓ Etiketleme başarılı")
-            return True
+            self.logger.info("✓ Tagging completed successfully")
         else:
-            self.logger.error("Etiketleme başarısız")
-            return False
+            self.logger.error("Failed to write metadata tags")
+        
+        return success
     
     def process_directory(self, directory: str, recursive: bool = False, save_cover: bool = False):
-        """Dizindeki tüm müzik dosyalarını işle"""
-        supported_extensions = ['.mp3', '.flac', '.ogg', '.oga', '.m4a', '.mp4', '.m4b']
+        """Batch process supported audio files within a directory"""
+        files = []
         
         if recursive:
-            files = []
             for root, _, filenames in os.walk(directory):
-                for filename in filenames:
-                    if os.path.splitext(filename)[1].lower() in supported_extensions:
-                        files.append(os.path.join(root, filename))
+                files.extend(
+                    os.path.join(root, f) for f in filenames
+                    if os.path.splitext(f)[1].lower() in self.SUPPORTED_FORMATS
+                )
         else:
             files = [
-                os.path.join(directory, f)
-                for f in os.listdir(directory)
-                if os.path.splitext(f)[1].lower() in supported_extensions
+                os.path.join(directory, f) for f in os.listdir(directory)
+                if os.path.splitext(f)[1].lower() in self.SUPPORTED_FORMATS
             ]
         
         if not files:
-            self.logger.warning("Müzik dosyası bulunamadı")
+            self.logger.warning("No supported music files found")
             return
         
-        self.logger.info(f"{len(files)} dosya bulundu")
+        self.logger.info(f"{len(files)} audio file(s) located")
         
-        success_count = 0
-        fail_count = 0
-        
+        results = {'success': 0, 'failed': 0}
         for filepath in files:
             try:
                 if self.process_file(filepath, save_cover):
-                    success_count += 1
+                    results['success'] += 1
                 else:
-                    fail_count += 1
+                    results['failed'] += 1
             except Exception as e:
-                print(f"Hata: {e}")
-                fail_count += 1
+                self.logger.error(f"Error processing {filepath}: {e}")
+                results['failed'] += 1
         
-        self.logger.info(f"Toplu etiketleme tamamlandı: {success_count} başarılı, {fail_count} başarısız")
+        self.logger.info(f"Batch processing complete: {results['success']} successful, {results['failed']} failed")
 
 
 def main():
-    parser = argparse.ArgumentParser(
-        description='MusicBrainz Audio Tagger - Picard alternatifi CLI aracı'
-    )
-    parser.add_argument(
-        'path',
-        help='İşlenecek dosya veya dizin'
-    )
-    parser.add_argument(
-        '-r', '--recursive',
-        action='store_true',
-        help='Alt dizinleri de tara'
-    )
-    parser.add_argument(
-        '-c', '--save-cover',
-        action='store_true',
-        help='Kapak fotoğrafını ayrı dosya olarak da kaydet'
-    )
-    parser.add_argument(
-        '-u', '--user-agent',
-        default='MusicTagger/1.0',
-        help='User-Agent string (varsayılan: MusicTagger/1.0)'
-    )
+    parser = argparse.ArgumentParser(description='MusicBrainz Audio Tagger CLI')
+    parser.add_argument('path', help='Target audio file or directory path')
+    parser.add_argument('-r', '--recursive', action='store_true', help='Scan target directory recursively')
+    parser.add_argument('-c', '--save-cover', action='store_true', help='Save cover art as a standalone file')
+    parser.add_argument('-u', '--user-agent', default='MusicTagger/1.0', help='Custom HTTP User-Agent string')
     
     args = parser.parse_args()
     
     if not os.path.exists(args.path):
-        print(f"Hata: '{args.path}' bulunamadı")
+        print(f"Error: Target path '{args.path}' does not exist")
         sys.exit(1)
     
     tagger = MusicTagger(args.user_agent)
@@ -731,7 +606,7 @@ def main():
     elif os.path.isdir(args.path):
         tagger.process_directory(args.path, args.recursive, args.save_cover)
     else:
-        print(f"Hata: '{args.path}' geçerli bir dosya veya dizin değil")
+        print(f"Error: '{args.path}' is neither a file nor a directory")
         sys.exit(1)
 
 

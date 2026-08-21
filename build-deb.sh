@@ -4,7 +4,7 @@
 set -e
 
 PKG_NAME="music-downloader"
-VERSION="1.1.0"
+VERSION="1.2.0"
 ARCH="all"
 BUILD_DIR="debian"
 

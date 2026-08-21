@@ -1,5 +1,5 @@
 pkgname=music-downloader
-pkgver=1.1.0
+pkgver=1.2.0
 pkgrel=1
 pkgdesc="YouTube music downloader with automatic MusicBrainz tagging and playlist support"
 arch=('any')

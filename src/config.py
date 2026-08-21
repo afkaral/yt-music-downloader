@@ -12,4 +12,5 @@ DEFAULT_CONFIG = {
     "search_limit": 50,
     "acoustid_api_key": "v8pQ6oyB",  # Picard's key (consider getting your own from https://acoustid.org/api-key)
     "create_m3u": True,
+    "window_title": "YT Music Downloader",
 }

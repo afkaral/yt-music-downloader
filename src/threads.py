@@ -1,6 +1,5 @@
 # src/threads.py
 from PySide6.QtCore import QThread, Signal
-from constants import SEARCH_LIMIT
 from config import * 
 import subprocess
 import logging
@@ -28,12 +27,11 @@ class VideoPlayer(QThread):
             command.append(self.url)
 
             subprocess.Popen(command)
-
-            logger.info(f"Video oynatılıyor: {self.url}")
+            logger.info(f"Video playback started: {self.url}")
             self.finished_playing.emit()
 
         except Exception as e:
-            logger.error(f"Video oynatma hatası: {e}")
+            logger.error(f"Video playback error: {e}")
 
 class SearchThread(QThread):
     result = Signal(str, str, str)
@@ -52,7 +50,7 @@ class SearchThread(QThread):
         self._stop = True
 
         if self.process and self.process.poll() is None:
-            self.process.kill()
+            self.process.kill()  # Stop video playback
 
     def run(self):
         self.process = subprocess.Popen(
@@ -134,7 +132,7 @@ class MusicTaggerThread(QThread):
 
     def run(self):
         try:
-            logger.info(f"MusicBrainz etiketleme başlatılıyor: {self.file_path}")
+            logger.info(f"Starting MusicBrainz tagging: {self.file_path}")
             
             # MusicTagger instance oluştur
             tagger = MusicTagger(
@@ -146,17 +144,17 @@ class MusicTaggerThread(QThread):
             success = tagger.process_file(self.file_path, save_cover=False)
             
             if success:
-                logger.info("✓ Etiketleme tamamlandı")
-                self.finished.emit("Etiketleme başarılı")
+                logger.info("Tagging complete")
+                self.finished.emit("Tagging complete")
             else:
-                logger.warning("Etiketleme başarısız oldu")
-                self.error.emit("Etiketleme başarısız")
+                logger.warning("Tagging failed")
+                self.error.emit("Tagging failed")
                 
         except Exception as e:
-            logger.error(f"MusicTagger kritik hatası: {e}")
+            logger.error(f"MusicTagger critical error: {e}")
             import traceback
             logger.debug(traceback.format_exc())
             self.error.emit(str(e))
 
-# Geriye dönük uyumluluk için alias
+# Alias for backward compatibility
 PicardTaggingThread = MusicTaggerThread

@@ -4,7 +4,7 @@
 set -e
 
 APP_NAME="MusicDownloader"
-VERSION="1.1.0"
+VERSION="1.2.0"
 APPDIR="${APP_NAME}.AppDir"
 
 echo "Building ${APP_NAME}-${VERSION}-x86_64.AppImage..."
