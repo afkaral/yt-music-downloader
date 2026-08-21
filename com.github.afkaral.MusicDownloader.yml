@@ -1,0 +1,75 @@
+app-id: com.github.afkaral.MusicDownloader
+runtime: org.kde.Platform
+runtime-version: '6.6'
+sdk: org.kde.Sdk
+command: music-downloader
+
+finish-args:
+  - --socket=x11
+  - --socket=wayland
+  - --socket=pulseaudio
+  - --share=network
+  - --share=ipc
+  - --filesystem=xdg-music
+  - --filesystem=xdg-download
+  - --device=dri
+  - --talk-name=org.freedesktop.Notifications
+
+modules:
+  - name: python3-requests
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps requests
+
+  - name: python3-mutagen
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps mutagen
+
+  - name: yt-dlp
+    buildsystem: simple
+    build-commands:
+      - pip3 install --prefix=/app --no-deps yt-dlp
+    sources:
+      - type: archive
+        url: https://github.com/yt-dlp/yt-dlp/archive/refs/tags/2024.08.06.tar.gz
+        sha256: 1234567890abcdef  # Update with actual hash
+
+  - name: ffmpeg
+    buildsystem: autotools
+    config-opts:
+      - --enable-shared
+      - --disable-static
+      - --disable-doc
+    sources:
+      - type: archive
+        url: https://ffmpeg.org/releases/ffmpeg-6.1.1.tar.xz
+        sha256: 1234567890abcdef  # Update with actual hash
+
+  - name: mpv
+    buildsystem: meson
+    sources:
+      - type: archive
+        url: https://github.com/mpv-player/mpv/archive/v0.37.0.tar.gz
+        sha256: 1234567890abcdef  # Update with actual hash
+
+  - name: chromaprint
+    buildsystem: cmake-ninja
+    sources:
+      - type: archive
+        url: https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-1.5.1.tar.gz
+        sha256: a1aad8fa3b8b18b78d3755b3767faff9abb67242e01b478ec9a64e190f335e1c
+
+  - name: music-downloader
+    buildsystem: simple
+    build-commands:
+      - install -d /app/lib/music-downloader
+      - install -Dm644 src/*.py /app/lib/music-downloader/
+      - install -Dm755 music-downloader.sh /app/bin/music-downloader
+      - install -Dm644 assets/music-downloader.desktop /app/share/applications/com.github.afkaral.MusicDownloader.desktop
+      - install -Dm644 assets/music-downloader.png /app/share/icons/hicolor/256x256/apps/com.github.afkaral.MusicDownloader.png
+    sources:
+      - type: dir
+        path: .
+      - type: file
+        path: music-downloader.sh

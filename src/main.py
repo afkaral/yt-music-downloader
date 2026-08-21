@@ -16,17 +16,27 @@ from threads import (
     SearchThread,
     DownloadThread,
     VideoPlayer,
+    MusicTaggerThread,
 )
 from constants import *
 
 
-(Path.home() / ".local" / "share" / "music-downloader").mkdir(parents=True, exist_ok=True)
+# Logging setup
+log_dir = Path.home() / ".local" / "share" / "music-downloader"
+log_dir.mkdir(parents=True, exist_ok=True)
+
 logging.basicConfig(
-    filename=str(Path.home() / ".local" / "share" / "music-downloader" / "app.log"),
-    level=logging.DEBUG,
-    format="%(asctime)s %(levelname)s: %(message)s",
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.FileHandler(log_dir / "app.log", encoding="utf-8"),
+        logging.StreamHandler(sys.stdout)
+    ],
     force=True,
 )
+
+logger = logging.getLogger(__name__)
 
 class SettingsDialog(QDialog):
     def __init__(self, parent=None):
@@ -36,44 +46,51 @@ class SettingsDialog(QDialog):
 
         self.setWindowTitle("Ayarlar")
         self.setWindowIcon(QIcon("resources/icon.png"))
-        self.resize(420, 200)
+        self.resize(480, 350)
 
         layout = QVBoxLayout(self)
 
+        # Player
         layout.addWidget(QLabel("Oynatıcı"))
-
         self.player = QComboBox()
-        self.player.addItems(["mpv", "vlc"])
+        self.player.addItems(["mpv", "vlc", "celluloid", "clementine"])
         self.player.setCurrentText(self.config["player"])
         layout.addWidget(self.player)
 
+        # Download path
         layout.addWidget(QLabel("Varsayılan indirme klasörü"))
-
         path_layout = QHBoxLayout()
-
         self.path = QLineEdit(self.config["download_path"])
         self.path.setReadOnly(True)
-
         browse = QPushButton("...")
-
         path_layout.addWidget(self.path)
         path_layout.addWidget(browse)
-
         layout.addLayout(path_layout)
-
         browse.clicked.connect(self.select_folder)
 
+        # Search limit
         layout.addWidget(QLabel("Arama sonucu"))
-
         self.limit = QSpinBox()
         self.limit.setRange(5, 200)
         self.limit.setSingleStep(5)
         self.limit.setValue(self.config["search_limit"])
         layout.addWidget(self.limit)
 
+        # M3U creation
+        from PySide6.QtWidgets import QCheckBox
+        self.create_m3u = QCheckBox("İndirdikten sonra M3U playlist oluştur")
+        self.create_m3u.setChecked(self.config.get("create_m3u", True))
+        layout.addWidget(self.create_m3u)
+
+        # AcoustID API Key
+        layout.addWidget(QLabel("AcoustID API Key (ücretsiz: acoustid.org/api-key)"))
+        self.api_key = QLineEdit(self.config.get("acoustid_api_key", "v8pQ6oyB"))
+        self.api_key.setPlaceholderText("Kendi API key'inizi alın (opsiyonel)")
+        layout.addWidget(self.api_key)
+
+        # Save button
         save = QPushButton("Kaydet")
         save.clicked.connect(self.save)
-
         layout.addWidget(save)
 
     def select_folder(self):
@@ -89,6 +106,8 @@ class SettingsDialog(QDialog):
         self.config["player"] = self.player.currentText()
         self.config["download_path"] = self.path.text()
         self.config["search_limit"] = self.limit.value()
+        self.config["create_m3u"] = self.create_m3u.isChecked()
+        self.config["acoustid_api_key"] = self.api_key.text().strip()
 
         save_config(self.config)
 
@@ -195,7 +214,7 @@ class MainWindow(QWidget):
             self.result_list.addItem(item)
 
         except Exception as e:
-            logging.error(e)
+            logger.error(f"Arama sonucu eklenirken hata: {e}")
 
     def search_finished(self):
         self.status_label.setText("Arama Bitti")
@@ -207,7 +226,7 @@ class MainWindow(QWidget):
 
     def search_failed(self, error):
         self.status_label.setText("Arama Başarısız")
-        logging.error("Arama hatası:\n" + error)
+        logger.error(f"Arama hatası: {error}")
 
     def play_video(self, item):
         if self.player_thread and self.player_thread.isRunning():
@@ -246,7 +265,7 @@ class MainWindow(QWidget):
             self.config["download_path"] = folder
             save_config(self.config)
             self.path_label.setText(folder)
-            logging.info(f"İndirme klasörü: {folder}")
+            logger.info(f"İndirme klasörü değiştirildi: {folder}")
 
     def download_selected(self):
         if hasattr(self, "download_thread") and self.download_thread.isRunning():
@@ -261,7 +280,7 @@ class MainWindow(QWidget):
         if not url:
             return
 
-        logging.info(f"İndiriliyor:{url}")
+        logger.info(f"İndirme başlatılıyor: {url}")
 
         command = [
             "yt-dlp",
@@ -305,38 +324,76 @@ class MainWindow(QWidget):
         self.download_button.setText(f"İndiriliyor... %{percent}")
 
     def download_failed(self, error):
-        logging.error("İndirme hatası:\n" + error)
+        logger.error(f"İndirme hatası: {error}")
         self.download_button.setEnabled(True)
         self.download_button.setText("İndir")
 
     def after_download(self, output):
-        logging.info("İndirme tamamlandı:\n" + output)
+        logger.info("İndirme başarıyla tamamlandı")
 
         filepath = find_downloaded_file(output)
 
         if filepath:
-            logging.info(f"Picard açılıyor: {filepath}")
+            logger.info(f"Etiketleme başlatılıyor: {filepath}")
+            self.status_label.setText("Müzik etiketleniyor...")
 
-            subprocess.run([
-                "picard",
-                filepath
-            ])
+            # MusicTagger ile etiketleme (config'den API key)
+            api_key = self.config.get("acoustid_api_key", "v8pQ6oyB")
+            self.tagger_thread = MusicTaggerThread(filepath, api_key=api_key)
+            self.tagger_thread.finished.connect(
+                lambda output: self.tagging_finished(output)
+            )
+            self.tagger_thread.error.connect(
+                lambda error: self.tagging_failed(error)
+            )
+            self.tagger_thread.start()        
         
         else:
-            logging.error("Dosya yolu bulunamadı")
+            logger.error("İndirilen dosya yolu bulunamadı")
+            self.status_label.setText("Dosya bulunamadı")
+            if self.config.get("create_m3u", True):
+                rebuild_m3u(self.download_path)
+                logger.info("Playlist yenilendi")
+            self.download_button.setEnabled(True)
+            self.download_button.setText("İndir")
 
-        rebuild_m3u(self.download_path)
-
-        logging.info("Picard ve m3u-fix çalıştırıldı")
-
+    def tagging_finished(self, output):
+        logger.info("✓ Müzik başarıyla etiketlendi")
+        self.status_label.setText("Etiketleme tamamlandı")
+        
+        if self.config.get("create_m3u", True):
+            rebuild_m3u(self.download_path)
+            logger.info("Playlist güncellendi")
+        
         self.download_button.setEnabled(True)
         self.download_button.setText("İndir")
 
+    def tagging_failed(self, error):
+        logger.warning(f"Etiketleme başarısız: {error}")
+        self.status_label.setText("Etiketleme başarısız")
+        
+        if self.config.get("create_m3u", True):
+            rebuild_m3u(self.download_path)
+            logger.info("Playlist güncellendi")
+        
+        self.download_button.setEnabled(True)
+        self.download_button.setText("İndir")
+
+    def closeEvent(self, event):
+        if hasattr(self, "download_thread") and self.download_thread.isRunning():
+            self.download_thread.terminate()
+        if hasattr(self, "search_thread") and self.search_thread.isRunning():
+            self.search_thread.stop()
+        if hasattr(self, "player_thread") and self.player_thread.isRunning():
+            self.player_thread.terminate()
+        event.accept()
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    app.setApplicationName("music-downloader")
+    app.setApplicationName("Yt Music Downloader")
     app.setDesktopFileName("music-downloader")
     app.setApplicationDisplayName("Music Downloader")
+    app.setApplicationVersion("1.1.0-musicbrainz")
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

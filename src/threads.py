@@ -1,11 +1,14 @@
 # src/threads.py
-
 from PySide6.QtCore import QThread, Signal
 from constants import SEARCH_LIMIT
 from config import * 
 import subprocess
 import logging
 import re
+import os
+from music_tagger import MusicTagger
+
+logger = logging.getLogger(__name__)
 
 class VideoPlayer(QThread):
     finished_playing = Signal()
@@ -26,11 +29,11 @@ class VideoPlayer(QThread):
 
             subprocess.Popen(command)
 
-            logging.info(f"Oynatılan URL: {self.url}")
+            logger.info(f"Video oynatılıyor: {self.url}")
             self.finished_playing.emit()
 
         except Exception as e:
-            logging.error(f"Hata: {e}")
+            logger.error(f"Video oynatma hatası: {e}")
 
 class SearchThread(QThread):
     result = Signal(str, str, str)
@@ -74,7 +77,7 @@ class SearchThread(QThread):
                     url = f"https://youtu.be/{video_id}"
                     self.result.emit(title, uploader, url)
                 except ValueError:
-                    logging.warning(f"Beklenmeyen çıktı: {line}")
+                    logger.debug(f"Beklenmeyen arama çıktısı: {line}")
 
         stderr = self.process.stderr.read() if self.process.stderr else ""
 
@@ -113,9 +116,47 @@ class DownloadThread(QThread):
                         if m:
                             self.progress.emit(int(float(m.group(1))))
                     except Exception as e:
-                        logging.debug(e)
+                        logger.debug(f"İlerleme parse hatası: {e}")
 
         if process.wait() == 0:
             self.finished.emit("".join(output))
         else:
             self.error.emit("".join(output))
+
+class MusicTaggerThread(QThread):
+    finished = Signal(str)
+    error = Signal(str)
+    
+    def __init__(self, file_path, api_key=None):
+        super().__init__()
+        self.file_path = file_path
+        self.api_key = api_key
+
+    def run(self):
+        try:
+            logger.info(f"MusicBrainz etiketleme başlatılıyor: {self.file_path}")
+            
+            # MusicTagger instance oluştur
+            tagger = MusicTagger(
+                user_agent="YtMusicDownloader/1.0",
+                api_key=self.api_key
+            )
+            
+            # Dosyayı etiketle
+            success = tagger.process_file(self.file_path, save_cover=False)
+            
+            if success:
+                logger.info("✓ Etiketleme tamamlandı")
+                self.finished.emit("Etiketleme başarılı")
+            else:
+                logger.warning("Etiketleme başarısız oldu")
+                self.error.emit("Etiketleme başarısız")
+                
+        except Exception as e:
+            logger.error(f"MusicTagger kritik hatası: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            self.error.emit(str(e))
+
+# Geriye dönük uyumluluk için alias
+PicardTaggingThread = MusicTaggerThread

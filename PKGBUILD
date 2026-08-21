@@ -1,16 +1,18 @@
 pkgname=music-downloader
-pkgver=1.0.0
+pkgver=1.1.0
 pkgrel=1
-pkgdesc="Simple YouTube music downloader with Picard tagging and m3u playlist support"
+pkgdesc="YouTube music downloader with automatic MusicBrainz tagging and playlist support"
 arch=('any')
 license=('MIT')
 depends=(
     python
-    pyside6
+    python-pyside6
+    python-requests
+    python-mutagen
     yt-dlp
     ffmpeg
     mpv
-    picard
+    chromaprint
 )
 source=()
 sha256sums=()
