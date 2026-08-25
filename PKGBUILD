@@ -3,7 +3,7 @@ pkgver=$(cat VERSION 2>/dev/null || echo "1.2.0")
 pkgrel=1
 pkgdesc="YouTube music downloader with automatic MusicBrainz tagging and playlist support"
 arch=('any')
-license=('MIT')
+license=('GPL-3.0-or-later')
 depends=(
     python
     python-pyside6
