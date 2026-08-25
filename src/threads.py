@@ -203,7 +203,7 @@ class MusicTaggerThread(QThread):
                 api_key=self.api_key
             )
             
-            # Dosyayı etiketle
+            # Tag the file
             success = tagger.process_file(self.file_path, save_cover=False)
             
             if success:

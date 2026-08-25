@@ -4,12 +4,29 @@
 debian/
 *.AppDir/
 appimagetool-*.AppImage
+*.tar.gz
+*.pkg.tar.*
+pkg/
+src/*.tar.gz
+
+# Winslop
+ffmpeg.zip
+fpcalc.zip
+ffmpeg/
+fpcalc/
+
+# Nix
+.result/
+result/
+.nix-cache/
+.nix-profile/
+.nix-defexpr/
+.nix-gcroots/
+.nix/
 
 # Python
 __pycache__/
-*.pyc
-*.pyo
-*.pyd
+*.py[cod]
 .Python
 *.so
 *.egg
@@ -23,31 +40,20 @@ build/
 *.swp
 *.swo
 *~
-
-# OS
 .DS_Store
 Thumbs.db
-
-# Config
-.config/
-.local/
-__pycache__/
-*.pyc
-*.pyo
-
-# Builds
-main.build/
-music-downloader/
-dist/
-build/
-squashfs-root/
 
 # Environment
 .venv/
 .virtualenv/
 
+# Random BS
+main.build/
+music-downloader/
+squashfs-root/
+.config/
+.local/
 app.log
 *.tar.zst
-*.tar.gz
 to-do-list.txt
-pkg/
+yt-music-downloader-*/ 
