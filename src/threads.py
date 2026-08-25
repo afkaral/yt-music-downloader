@@ -23,6 +23,7 @@ class VideoPlayer(QThread):
                 command += [
                     "--vo=gpu",
                     "--gpu-api=opengl",
+                    "--force-window=yes",
                 ]
             command.append(self.url)
 
@@ -34,53 +35,115 @@ class VideoPlayer(QThread):
             logger.error(f"Video playback error: {e}")
 
 class SearchThread(QThread):
-    result = Signal(str, str, str)
+    # title, uploader, url, platform
+    result = Signal(str, str, str, str)
     finished = Signal()
     error = Signal(str)
 
-    def __init__(self, query, limit):
+    def __init__(self, query, limit, platforms=None):
+        """Search thread using yt‑dlp.
+
+        Parameters
+        ----------
+        query: str – Search term.
+        limit: int – Max results.
+        platforms: list[str] or None – yt‑dlp search prefixes. If ``None`` a default list is used.
+        """
         super().__init__()
         self.query = query
         self._stop = False
         self.process = None
         self.limit = limit
+        # Platforms to query; defaults to YouTube, SoundCloud and Vimeo.
+        self.platforms = platforms or ["ytsearch", "scsearch", "gvsearch"]
 
-    
     def stop(self):
         self._stop = True
-
         if self.process and self.process.poll() is None:
-            self.process.kill()  # Stop video playback
+            self.process.kill()
 
     def run(self):
-        self.process = subprocess.Popen(
-            [
-                "yt-dlp",
-                f"ytsearch{self.limit}:{self.query}",
-                "--print",
-                "%(id)s\t%(title)s\t%(uploader)s",
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
+        logger.info(
+            f"Running composite search for query: '{self.query}', total limit: {self.limit}"
         )
 
-        if self.process.stdout:
-            for line in self.process.stdout:
+        # Perform a search on a single platform and return list of
+        #(title, uploader, url, platform) tuples
+        def fetch_platform_results(platform):
+            search_expr = f"{platform}{self.limit}:{self.query}"
+            cmd = [
+                "yt-dlp",
+                "--flat-playlist",
+                "--dump-json",
+                f"--max-downloads={self.limit}",
+                search_expr,
+            ]
+
+            logger.info(f"Executing {platform} command: {' '.join(cmd)}")
+            env = os.environ.copy()
+            env["PYTHONIOENCODING"] = "utf-8"
+            env["PYTHONENCODING"] = "utf-8"
+
+            completed = subprocess.run(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                env=env,
+            )
+            import json
+            results = []
+            for line in completed.stdout.splitlines():
+                line = line.strip()
+                if not line:
+                    continue
                 try:
-                    if self._stop:
-                        break
-                    video_id, title, uploader = line.rstrip().split("\t", 2)
-                    url = f"https://youtu.be/{video_id}"
-                    self.result.emit(title, uploader, url)
-                except ValueError:
-                    logger.debug(f"Beklenmeyen arama çıktısı: {line}")
+                    data = json.loads(line)
+                except Exception:
+                    continue
+                title = data.get("title") or ""
+                uploader = data.get("uploader") or ""
+                url = data.get("webpage_url") or data.get("url") or ""
+                if not url:
+                    # fallback to YouTube short link if id present
+                    video_id = data.get("id")
+                    if video_id:
+                            url = f"https://youtu.be/{video_id}"
+                if url:
+                    results.append((title, uploader, url, platform))
+            if completed.returncode != 0:
+                logger.error(f"{platform} search failed: {completed.stderr}")
+                self.error.emit(completed.stderr)
+            return results
 
-        stderr = self.process.stderr.read() if self.process.stderr else ""
+        # Gather results from each platform in the order defined in self.platforms
+        platform_results = {p: fetch_platform_results(p) for p in self.platforms}
 
-        if self.process.wait() != 0:
-            self.error.emit(stderr)
+        # Merge results: take up to two items from each platform per round
+        merged = []
+        idx = {p: 0 for p in self.platforms}
+        while len(merged) < self.limit:
+            made_progress = False
+            for p in self.platforms:
+                for _ in range(2):
+                    i = idx[p]
+                    if i < len(platform_results[p]):
+                        merged.append(platform_results[p][i])
+                        idx[p] += 1
+                        made_progress = True
+                        if len(merged) >= self.limit:
+                            break
+                if len(merged) >= self.limit:
+                    break
+            if not made_progress:
+                break
+
+        # Emit the combined, ordered results
+        logger.info(f"Merged {len(merged)} results to emit")
+        for title, uploader, url, platform in merged:
+            logger.info(f"Emitting result: [{platform}] {title} - {uploader}")
+            self.result.emit(title, uploader, url, platform)
 
         self.finished.emit()
 
@@ -114,7 +177,7 @@ class DownloadThread(QThread):
                         if m:
                             self.progress.emit(int(float(m.group(1))))
                     except Exception as e:
-                        logger.debug(f"İlerleme parse hatası: {e}")
+                        logger.debug(f"Parse error: {e}")
 
         if process.wait() == 0:
             self.finished.emit("".join(output))
@@ -158,3 +221,4 @@ class MusicTaggerThread(QThread):
 
 # Alias for backward compatibility
 PicardTaggingThread = MusicTaggerThread
+

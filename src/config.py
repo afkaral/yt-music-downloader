@@ -10,6 +10,7 @@ DEFAULT_CONFIG = {
     "player": "mpv",
     "download_path": str(Path.home() / "Music"),
     "search_limit": 50,
+    "search_platforms": ["ytsearch", "scsearch", "gvsearch"],  # List of yt‑dlp search prefixes (Discord omitted)
     "acoustid_api_key": "v8pQ6oyB",  # Picard's key (consider getting your own from https://acoustid.org/api-key)
     "create_m3u": True,
     "window_title": "YT Music Downloader",

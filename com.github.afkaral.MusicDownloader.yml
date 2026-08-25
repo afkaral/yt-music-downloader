@@ -65,11 +65,15 @@ modules:
     build-commands:
       - install -d /app/lib/music-downloader
       - install -Dm644 src/*.py /app/lib/music-downloader/
-      - install -Dm755 music-downloader.sh /app/bin/music-downloader
+      - install -d /app/bin
+      - |
+        cat << 'EOF' > /app/bin/music-downloader
+        #!/bin/sh
+        exec python3 /app/lib/music-downloader/main.py "$@"
+        EOF
+      - chmod 755 /app/bin/music-downloader
       - install -Dm644 assets/music-downloader.desktop /app/share/applications/com.github.afkaral.MusicDownloader.desktop
       - install -Dm644 assets/music-downloader.png /app/share/icons/hicolor/256x256/apps/com.github.afkaral.MusicDownloader.png
     sources:
       - type: dir
         path: .
-      - type: file
-        path: music-downloader.sh

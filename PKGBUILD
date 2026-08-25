@@ -1,5 +1,5 @@
 pkgname=music-downloader
-pkgver=1.2.0
+pkgver=$(cat VERSION 2>/dev/null || echo "1.2.0")
 pkgrel=1
 pkgdesc="YouTube music downloader with automatic MusicBrainz tagging and playlist support"
 arch=('any')
@@ -19,7 +19,7 @@ sha256sums=()
 
 package() {
     install -d "$pkgdir/usr/lib/music-downloader"
-    install -Dm644 -t "$pkgdir/usr/lib/music-downloader" "$startdir"/src/*.py
+    install -Dm644 "$startdir"/src/*.py "$pkgdir/usr/lib/music-downloader/"
 
     install -d "$pkgdir/usr/bin"
     cat > "$pkgdir/usr/bin/music-downloader" << 'WRAPPER'

@@ -35,13 +35,16 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Builds
 main.build/
 music-downloader/
 dist/
 build/
 
+# Environment
 .venv/
 .virtualenv/
 
 app.log
 *.tar.zst
+to-do-list.txt

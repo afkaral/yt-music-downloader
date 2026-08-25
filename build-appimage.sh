@@ -4,13 +4,14 @@
 set -e
 
 APP_NAME="MusicDownloader"
-VERSION="1.2.0"
+VERSION=$(cat VERSION 2>/dev/null | tr -d '\r\n' || echo "1.2.0")
 APPDIR="${APP_NAME}.AppDir"
+OUTPUT_NAME="${APP_NAME}-${VERSION}-x86_64.AppImage"
 
-echo "Building ${APP_NAME}-${VERSION}-x86_64.AppImage..."
+echo "Building ${OUTPUT_NAME}..."
 
 # Clean previous build
-rm -rf "$APPDIR"
+rm -rf "$APPDIR" "$OUTPUT_NAME"
 mkdir -p "$APPDIR"
 
 # Create directory structure
@@ -30,11 +31,9 @@ exec python3 "$HERE/../lib/music-downloader/main.py" "$@"
 EOF
 chmod 755 "$APPDIR/usr/bin/music-downloader"
 
-# Copy desktop file
+# Copy desktop file and icon
 cp assets/music-downloader.desktop "$APPDIR/"
 cp assets/music-downloader.desktop "$APPDIR/usr/share/applications/"
-
-# Copy icon
 cp assets/music-downloader.png "$APPDIR/"
 cp assets/music-downloader.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
 
@@ -55,12 +54,6 @@ if [ ! -f "appimagetool-x86_64.AppImage" ]; then
 fi
 
 # Build AppImage
-ARCH=x86_64 ./appimagetool-x86_64.AppImage "$APPDIR" "${APP_NAME}-${VERSION}-x86_64.AppImage"
+ARCH=x86_64 ./appimagetool-x86_64.AppImage "$APPDIR" "$OUTPUT_NAME"
 
-echo "AppImage built: ${APP_NAME}-${VERSION}-x86_64.AppImage"
-echo "Run with: ./${APP_NAME}-${VERSION}-x86_64.AppImage"
-echo ""
-echo "Note: You still need to install dependencies:"
-echo "  Ubuntu/Debian: sudo apt install python3-pyside6.qtwidgets python3-requests python3-mutagen yt-dlp ffmpeg mpv libchromaprint-tools"
-echo "  Fedora: sudo dnf install python3-pyside6 python3-requests python3-mutagen yt-dlp ffmpeg mpv chromaprint-tools"
-echo "  Arch: sudo pacman -S python-pyside6 python-requests python-mutagen yt-dlp ffmpeg mpv chromaprint"
+echo "AppImage successfully built: $OUTPUT_NAME"

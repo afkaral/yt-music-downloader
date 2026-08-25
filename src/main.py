@@ -19,7 +19,7 @@ from threads import (
     MusicTaggerThread,
 )
 
-# Logging setup
+# Configure logging
 log_dir = Path.home() / ".local" / "share" / "music-downloader"
 log_dir.mkdir(parents=True, exist_ok=True)
 
@@ -199,17 +199,36 @@ class MainWindow(QWidget):
         if not query:
             return
 
-        self.search_thread = SearchThread(query, self.config["search_limit"])
+        platforms = self.config.get("search_platforms")
+        self.search_thread = SearchThread(query, self.config["search_limit"], platforms)
         self.search_thread.result.connect(self.add_result)
         self.search_thread.finished.connect(self.search_finished)
         self.search_thread.error.connect(self.search_failed)
         self.search_thread.start()
 
-    def add_result(self, title, uploader, url):
+    def add_result(self, title, uploader, url, platform):
         try:
-            item = QListWidgetItem(f"{title} - {uploader}")
+            """Add a single search result to the list widget.
+
+            The result is prefixed with the platform (e.g. [ytsearch]) so the user
+            knows where it came from.
+            """
+            logger.info(f"add_result called: platform={platform}, title={title}")
+            # Validate the URL
+            if not url or url == "NA" or url == "None" or url.strip() == "":
+                logger.warning(f"Invalid URL received: {url}")
+                return
+                
+            prefix = f"[{platform}]"
+            if "youtube.com" in url or "youtu.be" in url:
+                display = f"{prefix}{title} - {uploader} (Youtube)"
+            else:
+                display = f"{prefix}{title} - {uploader}"
+            item = QListWidgetItem(display)
             item.setData(Qt.UserRole, url)
+            item.setData(Qt.UserRole + 1, platform)  # store platform for later use
             self.result_list.addItem(item)
+            logger.info(f"Added search result: {item} from {platform}")
 
         except Exception as e:
             logger.error(f"Error adding search result: {e}")
@@ -225,6 +244,10 @@ class MainWindow(QWidget):
     def search_failed(self, error):
         self.status_label.setText("Search Failed")
         logger.error(f"Search error: {error}")
+        # Add error message to list for user feedback
+        error_item = QListWidgetItem(f"Search Error: {error}")
+        error_item.setData(Qt.UserRole, "")
+        self.result_list.addItem(error_item)
 
     def play_video(self, item):
         if self.player_thread and self.player_thread.isRunning():
@@ -232,7 +255,9 @@ class MainWindow(QWidget):
 
         url = item.data(Qt.UserRole)
 
-        if not url:
+        if not url or url == "NA" or url == "None":
+            logger.warning("Invalid URL for playback")
+            self.status_label.setText("Invalid URL for playback")
             return
 
         self.play_button.setEnabled(False)
@@ -275,7 +300,10 @@ class MainWindow(QWidget):
 
         url = item.data(Qt.UserRole)
 
-        if not url:
+        # Use the stored full URL directly (yt‑dlp can handle YouTube and SoundCloud URLs).
+        if not url or url == "NA" or url == "None":
+            logger.warning("Invalid URL for download")
+            self.status_label.setText("Invalid URL for download")
             return
 
         logger.info(f"Starting download: {url}")
@@ -325,17 +353,29 @@ class MainWindow(QWidget):
         logger.error(f"Download error: {error}")
         self.download_button.setEnabled(True)
         self.download_button.setText("Download")
+        self.status_label.setText("Download failed")
 
     def after_download(self, output):
         logger.info("Download completed successfully")
 
         filepath = find_downloaded_file(output)
 
+        # If yt‑dlp did not provide a destination (common for SoundCloud), pick the newest
+        # file in the download folder as a fallback.
+        if not filepath and self.download_path:
+            try:
+                files = list(Path(self.download_path).glob("*.*"))
+                if files:
+                    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+                    filepath = str(files[0])
+            except Exception as e:
+                logger.error(f"Failed to locate downloaded file: {e}")
+
         if filepath:
             logger.info(f"Starting tagging: {filepath}")
             self.status_label.setText("Tagging music...")
 
-            # Tagging with MusicTagger (from config API key)
+            #Tag the downloaded file using the AcoustID API key (if provided)
             api_key = self.config.get("acoustid_api_key", "v8pQ6oyB")
             self.tagger_thread = MusicTaggerThread(filepath, api_key=api_key)
             self.tagger_thread.finished.connect(
@@ -344,8 +384,7 @@ class MainWindow(QWidget):
             self.tagger_thread.error.connect(
                 lambda error: self.tagging_failed(error)
             )
-            self.tagger_thread.start()        
-        
+            self.tagger_thread.start()
         else:
             logger.error("Downloaded file path not found")
             self.status_label.setText("File not found")
@@ -387,12 +426,18 @@ class MainWindow(QWidget):
             self.player_thread.wait()
         event.accept()
 
+def get_version():
+    version_file = Path(__file__).parent.parent / "VERSION"
+    if version_file.exists():
+        return version_file.read_text().strip()
+    return "1.2.0" # Fallback
+
 if __name__ == '__main__':
     app = QApplication(sys.argv)
     app.setApplicationName("Yt Music Downloader")
     app.setDesktopFileName("music-downloader")
     app.setApplicationDisplayName("Music Downloader")
-    app.setApplicationVersion("1.2.0-musicbrainz")
+    app.setApplicationVersion(get_version())
     window = MainWindow()
     window.show()
     sys.exit(app.exec())

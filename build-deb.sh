@@ -4,7 +4,7 @@
 set -e
 
 PKG_NAME="music-downloader"
-VERSION="1.2.0"
+VERSION=$(cat VERSION 2>/dev/null || echo "1.2.0")
 ARCH="all"
 BUILD_DIR="debian"
 
