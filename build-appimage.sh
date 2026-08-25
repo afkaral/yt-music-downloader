@@ -4,7 +4,7 @@
 set -e
 
 APP_NAME="MusicDownloader"
-VERSION=$(cat VERSION 2>/dev/null | tr -d '\r\n' || echo "1.2.0")
+VERSION=$(cat VERSION 2>/dev/null | tr -d '\r\n' || echo "1.2.1")
 APPDIR="${APP_NAME}.AppDir"
 OUTPUT_NAME="${APP_NAME}-${VERSION}-x86_64.AppImage"
 
@@ -53,7 +53,10 @@ if [ ! -f "appimagetool-x86_64.AppImage" ]; then
     chmod +x appimagetool-x86_64.AppImage
 fi
 
-# Build AppImage
-ARCH=x86_64 ./appimagetool-x86_64.AppImage "$APPDIR" "$OUTPUT_NAME"
+# Fix FUSE library loading issue
+export LD_LIBRARY_PATH="/usr/lib:/lib:/usr/lib64:$LD_LIBRARY_PATH"
+
+# Build AppImage with explicit library path
+ARCH=x86_64 env LD_LIBRARY_PATH="/usr/lib:/lib:/usr/lib64:$LD_LIBRARY_PATH" ./appimagetool-x86_64.AppImage "$APPDIR" "$OUTPUT_NAME"
 
 echo "AppImage successfully built: $OUTPUT_NAME"

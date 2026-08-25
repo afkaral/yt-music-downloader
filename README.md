@@ -93,4 +93,4 @@ Access via Settings button:
 
 ## License
 
-MIT
+GPL v3.0
