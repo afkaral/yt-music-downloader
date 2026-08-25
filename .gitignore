@@ -48,4 +48,6 @@ squashfs-root/
 
 app.log
 *.tar.zst
+*.tar.gz
 to-do-list.txt
+pkg/
