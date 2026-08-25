@@ -1,15 +1,13 @@
 pkgname=music-downloader
-_fullver=$(cat VERSION 2>/dev/null || echo "1.2.1")
-pkgver=${_fullver%%-*}
-pkgrel=${_fullver#*-}
-[[ "$pkgrel" == "$_fullver"]] && pkgrel=1
+pkgver=1.2.1
+pkgrel=1
 pkgdesc="YouTube music downloader with automatic MusicBrainz tagging and playlist support"
 arch=('any')
-url="https://github.com/your‑user/yt-music-downloader"
+url="https://github.com/afkaral/yt-music-downloader"
 license=('GPL-3.0-or-later')
 depends=(
     python
-    python-pyside6
+    pyside6
     python-requests
     python-mutagen
     yt-dlp
@@ -17,11 +15,11 @@ depends=(
     mpv
     chromaprint
 )
-source=("${url}/archive/refs/tags/v${pkgver}.tar.gz")
-sha256sums=('SKIP')  # replace with real checksum after first successful build
+source=("${url}/archive/refs/tags/v${pkgver}-${pkgrel}.tar.gz")
+sha256sums=('90f78a270115b7bf8ae040ee238ea5ac47bf7afcb094aab62734a22d35153c30')  # replace with real checksum after first successful build
 package() {
     # $srcdir contains the extracted tarball
-    cd "$srcdir/yt-music-downloader-${pkgver}"
+    cd "$srcdir/yt-music-downloader-${pkgver}-${pkgrel}"
 
     # Python modules
     install -d "$pkgdir/usr/lib/music-downloader"
