@@ -48,6 +48,7 @@ Thumbs.db
 .virtualenv/
 
 # Random BS
+.continue/
 main.build/
 music-downloader/
 squashfs-root/

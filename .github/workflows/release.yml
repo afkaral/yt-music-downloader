@@ -92,6 +92,19 @@ jobs:
           $fpcalcBin = Get-ChildItem -Path . -Filter "fpcalc.exe" -Recurse | Select-Object -First 1
           Copy-Item $fpcalcBin.FullName -Destination "dist/MusicDownloader/"
 
+      - name: Download yt-dlp for Windows
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe" -OutFile "dist/MusicDownloader/yt-dlp.exe"
+
+      - name: Download mpv for Windows
+        shell: powershell
+        run: |
+          Invoke-WebRequest -Uri "https://github.com/mpv-player/mpv/releases/download/v0.41.0/mpv-v0.41.0-x86_64-pc-windows-msvc.zip" -OutFile "mpv.zip"
+          Expand-Archive -Path "mpv.zip" -DestinationPath "."
+          $mpvBin = Get-ChildItem -Path . -Filter "mpv.exe" -Recurse | Select-Object -First 1
+          Copy-Item $mpvBin.FullName -Destination "dist/MusicDownloader/"
+
       - name: Create Zip Archive
         shell: powershell
         run: |
