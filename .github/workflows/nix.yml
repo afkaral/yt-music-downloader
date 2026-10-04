@@ -16,3 +16,9 @@ jobs:
 
       - name: Build Flake
         run: nix build ./packaging/nix
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            result/**
