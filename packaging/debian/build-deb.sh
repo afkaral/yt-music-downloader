@@ -3,8 +3,9 @@
 
 set -e
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 PKG_NAME="music-downloader"
-VERSION=$(cat VERSION 2>/dev/null || echo "1.2.0")
+VERSION=$(cat "$PROJECT_ROOT/VERSION" 2>/dev/null || echo "1.3.0")
 ARCH="all"
 BUILD_DIR="debian"
 
@@ -22,7 +23,7 @@ mkdir -p "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps"
 mkdir -p "$BUILD_DIR/usr/share/doc/music-downloader"
 
 # Copy source files
-cp src/*.py "$BUILD_DIR/usr/lib/music-downloader/"
+cp -r src/* "$BUILD_DIR/usr/lib/music-downloader/"
 
 # Create launcher script
 cat > "$BUILD_DIR/usr/bin/music-downloader" << 'EOF'
@@ -32,12 +33,12 @@ EOF
 chmod 755 "$BUILD_DIR/usr/bin/music-downloader"
 
 # Copy desktop file and icon
-cp assets/music-downloader.desktop "$BUILD_DIR/usr/share/applications/"
-cp assets/music-downloader.png "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/"
+cp "$PROJECT_ROOT/assets/music-downloader.desktop" "$BUILD_DIR/usr/share/applications/"
+cp "$PROJECT_ROOT/assets/music-downloader.png" "$BUILD_DIR/usr/share/icons/hicolor/256x256/apps/"
 
 # Copy documentation
-cp README.md "$BUILD_DIR/usr/share/doc/music-downloader/"
-cp LICENSE "$BUILD_DIR/usr/share/doc/music-downloader/"
+cp "$PROJECT_ROOT/README.md" "$BUILD_DIR/usr/share/doc/music-downloader/"
+cp "$PROJECT_ROOT/LICENSE" "$BUILD_DIR/usr/share/doc/music-downloader/"
 
 # Create control file
 cat > "$BUILD_DIR/DEBIAN/control" << EOF
@@ -46,7 +47,7 @@ Version: ${VERSION}
 Section: sound
 Priority: optional
 Architecture: ${ARCH}
-Depends: python3 (>= 3.11), python3-pyside6.qtwidgets, python3-requests, python3-mutagen, yt-dlp, ffmpeg, mpv, libchromaprint-tools
+Depends: python3 (>= 3.11), python3-pyside6, python3-requests, python3-mutagen, yt-dlp, ffmpeg, libchromaprint-tools
 Maintainer: afkaral <afkaral@github.com>
 Description: YouTube music downloader with MusicBrainz tagging
  Modern music downloader with YouTube search and automatic metadata tagging.

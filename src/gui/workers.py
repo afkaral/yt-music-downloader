@@ -6,41 +6,18 @@ import re
 import os
 import json
 from pathlib import Path
-from music_tagger import MusicTagger
-from utils import _get_duration_ffprobe, _atomic_write
+try:
+    from ..core.tagger import MusicTagger
+    from ..core.organizer import MusicOrganizer
+    from ..utils import get_library_path
+    from ..utils.system import _get_duration_ffprobe, _atomic_write
+except ImportError:
+    from core.tagger import MusicTagger
+    from core.organizer import MusicOrganizer
+    from utils import get_library_path
+    from utils.system import _get_duration_ffprobe, _atomic_write
 
 logger = logging.getLogger(__name__)
-
-
-class VideoPlayer(QThread):
-    finished_playing = Signal()
-    def __init__(self, player, url):
-        super().__init__()
-        self.player = player
-        self.url = url
-
-    def run(self):
-        try:
-            command = [self.player]
-            if self.player == "mpv":
-                command += [
-                    "--vo=gpu",
-                    "--gpu-api=opengl",
-                    "--force-window=yes",
-                ]
-            command.append(self.url)
-
-            # Store the Popen object so we can terminate it on close
-            self._proc = subprocess.Popen(
-                command,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-            )
-            logger.info(f"Video playback started: {self.url}")
-        except Exception as e:
-            logger.error(f"Video playback error: {e}")
-        finally:
-            self.finished_playing.emit()
 
 #  SearchThread – streams results from YouTube (ytsearch) and SoundCloud (scsearch)
 class SearchThread(QThread):
@@ -163,7 +140,7 @@ class SearchThread(QThread):
 
         # Clean‑up: terminate any still‑running subprocesses.
         for platform, proc in processes.items():
-            if proc.poll() is None:               # still alive
+            if proc.poll() is None:      # still alive
                 try:
                     proc.terminate()
                     proc.wait(timeout=2)
@@ -177,6 +154,11 @@ class SearchThread(QThread):
                     proc.stderr.close()
             except Exception:
                 pass
+
+        try:
+            selector.close()
+        except Exception:
+            pass
 
         logger.info("SearchThread finished – emitted %d results", emitted)
         self.finished.emit()
@@ -194,14 +176,9 @@ class DownloadThread(QThread):
 
     def stop(self):
         self._stop = True
-        if self.process:
+        if self.process and self.process.poll() is None:
             try:
-                # Try to terminate gracefully first
                 self.process.terminate()
-                # Give it a moment to close files
-                self.process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.process.kill()
             except Exception as e:
                 logger.error(f"Error stopping download process: {e}")
 
@@ -260,27 +237,37 @@ class MusicTaggerThread(QThread):
     finished = Signal(str)
     error = Signal(str)
     
-    def __init__(self, file_path, api_key=None):
+    def __init__(self, file_path, config):
         super().__init__()
         self.file_path = file_path
-        self.api_key = api_key
+        self.config = config
 
     def run(self):
         try:
-            logger.info(f"Starting MusicBrainz tagging: {self.file_path}")
+            logger.info(f"Starting music tagging: {self.file_path}")
             
             tagger = MusicTagger(
-                user_agent="YtMusicDownloader/1.0",
-                api_key=self.api_key
+                logger=logger,
+                acoustid_key=self.config.get("acoustid_api_key"),
+                genius_token=self.config.get("genius_token"),
+                options=MusicTagger.options_from_config(self.config)
             )
             
-            success = tagger.process_file(self.file_path, save_cover=False)
-            
-            if success:
-                self.finished.emit("Tagging complete")
-            else:
-                # Distinguish between "no match found" and actual error
+            if not tagger.process_file(str(self.file_path)):
                 self.error.emit("No metadata match found or tagging failed")
+                return
+
+            if not self.config.get("organize_after_tag", False):
+                self.finished.emit("Tagging complete")
+                return
+
+            # Move the freshly tagged file into Artist/Album/NN - Title
+            organizer = MusicOrganizer(get_library_path(self.config), logger=logger)
+            target = organizer.organize_file(Path(self.file_path))
+            if target:
+                self.finished.emit(f"Tagged and organized: {target}")
+            else:
+                self.finished.emit("Tagging complete (not organized: artist/album/title tags incomplete)")
                 
         except Exception as e:
             logger.error(f"MusicTagger critical error: {e}")
@@ -292,11 +279,28 @@ class MusicTaggerThread(QThread):
 class M3URebuildThread(QThread):
     finished = Signal(str)
     error = Signal(str)
+    progress = Signal(int, int)  # current, total
 
     def __init__(self, folder):
         super().__init__()
         self.folder = Path(folder).resolve()
         self.audio_extensions = {".mp3", ".flac", ".m4a", ".ogg", ".wav", ".wma"}
+        self._duration_cache = {}  # Cache durations by file path + mtime
+
+    def _get_cached_duration(self, filepath: Path) -> int:
+        """Get duration with caching based on file modification time"""
+        try:
+            mtime = filepath.stat().st_mtime
+            cache_key = f"{filepath}:{mtime}"
+            
+            if cache_key in self._duration_cache:
+                return self._duration_cache[cache_key]
+            
+            duration = _get_duration_ffprobe(filepath)
+            self._duration_cache[cache_key] = duration
+            return duration
+        except Exception:
+            return 0
 
     def run(self):
         playlist_path = self.folder / f"{self.folder.name}.m3u"
@@ -307,21 +311,36 @@ class M3URebuildThread(QThread):
             return
 
         try:
-            current_files = {}
-            # Iterate and get duration
+            # First pass: collect files (fast)
+            audio_files = []
             for item in self.folder.iterdir():
                 if (
                     item.is_file()
                     and item.suffix.lower() in self.audio_extensions
                     and item != playlist_path
                 ):
-                    # Use ffprobe, handle errors inside _get_duration_ffprobe
-                    duration = _get_duration_ffprobe(item)
-                    current_files[item.name] = {
-                        "path": item,
-                        "duration": duration,
-                        "stem": item.stem
-                    }
+                    audio_files.append(item)
+            
+            total_files = len(audio_files)
+            if total_files == 0:
+                logger.warning("No audio files found in %s", self.folder)
+                self.error.emit("No audio files found")
+                return
+            
+            logger.info(f"Building M3U for {total_files} files...")
+            
+            # Second pass: get durations with progress
+            current_files = {}
+            for idx, item in enumerate(audio_files, 1):
+                # Emit progress
+                self.progress.emit(idx, total_files)
+                
+                duration = self._get_cached_duration(item)
+                current_files[item.name] = {
+                    "path": item,
+                    "duration": duration,
+                    "stem": item.stem
+                }
 
             lines = ["#EXTM3U\n"]
             for filename in sorted(current_files.keys()):
@@ -341,5 +360,22 @@ class M3URebuildThread(QThread):
             logger.error("Failed to rebuild M3U: %s", e)
             self.error.emit(str(e))
 
+class OrganizeThread(QThread):
+    finished = Signal(int, int)  # organized, skipped
+    error = Signal(str)
+
+    def __init__(self, source, library):
+        super().__init__()
+        self.source = source
+        self.library = library
+
+    def run(self):
+        try:
+            organizer = MusicOrganizer(self.library, logger=logger)
+            results = organizer.organize_directory(self.source, recursive=True)
+            self.finished.emit(results['organized'], results['skipped'])
+        except Exception as e:
+            logger.error(f"Organize error: {e}")
+            self.error.emit(str(e))
 
 PicardTaggingThread = MusicTaggerThread

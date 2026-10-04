@@ -1,7 +1,7 @@
 # Build artifacts
 *.deb
 *.AppImage
-debian/
+packaging/debian/debian
 *.AppDir/
 appimagetool-*.AppImage
 *.tar.gz
@@ -58,3 +58,6 @@ app.log
 *.tar.zst
 to-do-list.txt
 yt-music-downloader-*/ 
+.pytest_cache
+repomix-output.xml
+playlist_migrator.py

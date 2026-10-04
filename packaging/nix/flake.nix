@@ -7,7 +7,7 @@
 
   outputs = { self, nixpkgs }:
     let
-      system = "x86_64-linux"; # Gerekiyorsa aarch64-linux vs.
+      system = "x86_64-linux";
       pkgs = import nixpkgs { inherit system; };
 
       pythonDeps = ps: with ps; [
@@ -19,12 +19,11 @@
 
       myPython = pkgs.python3.withPackages pythonDeps;
 
-      # Uygulama Paket Tanımı
       music-downloader = pkgs.stdenv.mkDerivation {
         pname = "music-downloader";
-        version = "1.2.0";
+        version = pkgs.lib.strings.trim (builtins.readFile ../../VERSION);
 
-        src = ./.;
+        src = ../..;
 
         nativeBuildInputs = [ pkgs.makeWrapper ];
         buildInputs = [ myPython ];
@@ -32,25 +31,22 @@
         installPhase = ''
           mkdir -p $out/bin $out/share/music-downloader
           
-          # Kaynak kodları kopyala
           cp -r src/* $out/share/music-downloader/
 
-          # Wrapper (çalıştırıcı) betiğini oluştur
           makeWrapper ${myPython}/bin/python $out/bin/music-downloader \
             --add-flags "$out/share/music-downloader/main.py" \
-            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg pkgs.mpv pkgs.chromaprint pkgs.yt-dlp ]}
+            --prefix PATH : ${pkgs.lib.makeBinPath [ pkgs.ffmpeg pkgs.chromaprint pkgs.yt-dlp ]}
         '';
       };
 
     in {
       packages.${system}.default = music-downloader;
 
-      # Geliştirme ortamı (nix develop)
+      # nix develop
       devShells.${system}.default = pkgs.mkShell {
         packages = [
           myPython
           pkgs.ffmpeg
-          pkgs.mpv
           pkgs.chromaprint
           pkgs.yt-dlp
         ];

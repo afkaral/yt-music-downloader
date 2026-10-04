@@ -1,520 +1,385 @@
-# src/main.py
+#!/usr/bin/env python3
+"""
+YT Music Downloader - Main Entry Point
+
+Usage:
+  python ytmusicdl.py              # Launch GUI (default)
+  python ytmusicdl.py gui          # Launch GUI explicitly
+  python ytmusicdl.py tag <file>   # Tag audio file
+  python ytmusicdl.py config --list # Show configuration
+  python ytmusicdl.py --help       # Show help
+"""
+
+import os
 import sys
-import subprocess
+import argparse
 import logging
 from pathlib import Path
-from datetime import datetime
-from PySide6.QtWidgets import (
-    QApplication, QLabel, QWidget, QVBoxLayout, 
-    QLineEdit, QPushButton, QListWidget, 
-    QListWidgetItem, QFileDialog, QHBoxLayout,
-    QDialog, QComboBox, QSpinBox, QCheckBox,
-    QGroupBox, QFormLayout
-)
-from PySide6.QtGui import QIcon, QFont
-from PySide6.QtCore import Qt, QThread, Signal
-# Import specific functions to avoid namespace pollution
-from utils import load_config, save_config, find_downloaded_file
-from threads import (
-    SearchThread,
-    DownloadThread,
-    VideoPlayer,
-    MusicTaggerThread,
-    M3URebuildThread,
-)
+
+# Add src to path
+sys.path.insert(0, str(Path(__file__).parent))
+
 from logging_config import configure_logging
-
-# Configure logging
-logger = configure_logging()
-
-# Centralized fallback values
-DEFAULT_ACoustID_KEY = "v8pQ6oyB"
-
-class SettingsDialog(QDialog):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-
-        self.config = load_config()
-
-        self.setWindowTitle("Settings")
-        icon_path = "resources/icon.png"
-        if Path(icon_path).exists():
-            self.setWindowIcon(QIcon(icon_path))
-        self.resize(480, 350)
-
-        layout = QVBoxLayout(self)
-
-        # Player
-        layout.addWidget(QLabel("Player"))
-        self.player = QComboBox()
-        self.player.addItems(["mpv", "vlc", "celluloid", "clementine"])
-        self.player.setCurrentText(self.config.get("player", "mpv"))
-        layout.addWidget(self.player)
-
-        # ---- Exclusive platform selector ---------------------------------
-        self.platform_selector = QComboBox()
-        self.platform_selector.addItems(["YouTube", "SoundCloud"])
-        # Load the saved value (default to YouTube)
-        saved_platform = self.config.get("search_platform", "YouTube")
-        idx = self.platform_selector.findText(saved_platform)
-        if idx >= 0:
-            self.platform_selector.setCurrentIndex(idx)
-
-        layout.addWidget(QLabel("Search platform"))
-        layout.addWidget(self.platform_selector)
-
-        # Download path
-        layout.addWidget(QLabel("Default download folder"))
-        path_layout = QHBoxLayout()
-        self.path = QLineEdit(self.config.get("download_path", str(Path.home() / "Music")))
-        self.path.setReadOnly(True)
-        browse = QPushButton("...")
-        path_layout.addWidget(self.path)
-        path_layout.addWidget(browse)
-        layout.addLayout(path_layout)
-        browse.clicked.connect(self.select_folder)
-
-        # Search limit
-        layout.addWidget(QLabel("Search results limit"))
-        self.limit = QSpinBox()
-        self.limit.setRange(5, 200)
-        self.limit.setSingleStep(5)
-        self.limit.setValue(self.config.get("search_limit", 50))
-        layout.addWidget(self.limit)
-
-        # M3U creation
-        self.create_m3u = QCheckBox("Generate M3U playlist after download")
-        self.create_m3u.setChecked(self.config.get("create_m3u", True))
-        layout.addWidget(self.create_m3u)
-
-        # AcoustID API Key
-        layout.addWidget(QLabel("AcoustID API Key (free: acoustid.org/api-key)"))
-        self.api_key = QLineEdit(self.config.get("acoustid_api_key", DEFAULT_ACoustID_KEY))
-        self.api_key.setPlaceholderText("Get your own API key (optional)")
-        layout.addWidget(self.api_key)
-
-        # Save button
-        save = QPushButton("Save")
-        save.clicked.connect(self.save)
-        layout.addWidget(save)
-
-    def select_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select default folder"
-        )
-
-        if folder:
-            self.path.setText(folder)
-
-    def save(self):
-        self.config["player"] = self.player.currentText()
-        self.config["download_path"] = self.path.text()
-        self.config["search_limit"] = self.limit.value()
-        self.config["create_m3u"] = self.create_m3u.isChecked()
-        self.config["acoustid_api_key"] = self.api_key.text().strip()
-        self.config["search_platform"] = self.platform_selector.currentText()
-
-        save_config(self.config)
-
-        self.accept()
-
-class MainWindow(QWidget):
-    def __init__(self):
-        super().__init__()
-
-        self.config = load_config()
-        self.download_path = self.config.get("download_path", str(Path.home() / "Music"))
-
-        # Thread references
-        self.search_thread = None
-        self.download_thread = None
-        self.player_thread = None
-        self.tagger_thread = None
-        self.m3u_thread = None
-
-        self.setWindowTitle(self.config.get("window_title", "Yt Music Downloader"))
-        self.setGeometry(100, 100, 650, 600) # Slightly wider for better layout
-        
-        # Main UI
-        main_widget = QWidget()
-        layout = QVBoxLayout(main_widget)
-
-        # Search Area
-        search_layout = QHBoxLayout()
-
-        self.search_bar = QLineEdit()
-        self.search_bar.setPlaceholderText("Search for music...")
-        self.search_bar.returnPressed.connect(self.search_videos)
-        search_layout.addWidget(self.search_bar)
-
-        self.settings_button = QPushButton("⚙")
-        self.settings_button.setFixedWidth(36)
-        self.settings_button.clicked.connect(self.open_settings)
-        search_layout.addWidget(self.settings_button)
-
-        self.stop_button = QPushButton("X")
-        self.stop_button.setFixedWidth(32)
-        self.stop_button.clicked.connect(self.stop_search)
-        self.stop_button.setEnabled(False)
-        search_layout.addWidget(self.stop_button)
-
-        layout.addLayout(search_layout)
-
-        # Results List
-        self.result_list = QListWidget()
-        self.result_list.itemDoubleClicked.connect(self.play_video)
-        self._seen_urls = set()
-        layout.addWidget(self.result_list)
-
-        # Action Buttons
-        button_layout = QHBoxLayout()
-
-        self.play_button = QPushButton("Play")
-        self.play_button.clicked.connect(self.play_selected)
-        self.play_button.setEnabled(False) # Disabled until item selected
-
-        self.download_button = QPushButton("Download")
-        self.download_button.clicked.connect(self.download_selected)
-        
-        button_layout.addWidget(self.play_button)
-        button_layout.addWidget(self.download_button)
-        layout.addLayout(button_layout)
-
-        # Folder Selection
-        folder_layout = QHBoxLayout()
-        self.folder_button = QPushButton("Select Download Folder")
-        self.folder_button.clicked.connect(self.select_folder)
-        folder_layout.addWidget(self.folder_button)
-        layout.addLayout(folder_layout)
-
-        # Status Footer
-        status_layout = QHBoxLayout()
-        
-        self.path_label = QLabel(f"Path: {self.download_path}")
-        self.path_label.setWordWrap(True)
-        self.path_label.setStyleSheet("color: gray; font-size: 12px;")
-        
-        self.status_label = QLabel("Ready")
-        self.status_label.setStyleSheet("font-weight: bold; color: #007A33;") # Green
-        
-        status_layout.addWidget(self.path_label)
-        status_layout.addStretch() # Push status to right
-        status_layout.addWidget(self.status_label)
-        
-        layout.addLayout(status_layout)
-
-        self.setLayout(layout)
-
-        # Connect selection change to enable/disable play button
-        self.result_list.currentItemChanged.connect(self.on_item_selection_changed)
-
-    def on_item_selection_changed(self, current, previous):
-        if current:
-            self.play_button.setEnabled(True)
-        else:
-            self.play_button.setEnabled(False)
-
-    def open_settings(self):
-        dlg = SettingsDialog(self)
-        if dlg.exec():
-            self.config = load_config()
-            self.download_path = self.config.get("download_path", str(Path.home() / "Music"))
-            self.path_label.setText(f"Path: {self.download_path}")
-            logger.info("Settings updated")
-
-    def search_videos(self):
-        query = self.search_bar.text().strip()
-        if not query:
-            return
-
-        self.set_status("Searching...", "blue")
-        self.stop_button.setEnabled(True)
-
-        # Stop any previous search
-        if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.stop()
-            self.search_thread.wait()
-
-        self.result_list.clear()
-
-        limit = self.config.get("search_limit", 50)
-
-        # -----------------------------------------------------------------
-        # ONE platform ONLY – read the setting saved by SettingsDialog
-        # -----------------------------------------------------------------
-        platform_name = self.config.get("search_platform", "YouTube")
-        if platform_name == "YouTube":
-            platforms = ["ytsearch"]
-        else:   # SoundCloud
-            platforms = ["scsearch"]
-
-        logger.info(f"Starting search for '{query}' (limit {limit}) on {platforms}")
-
-        self.search_thread = SearchThread(query, limit, platforms)
-        self.search_thread.result.connect(self.add_result)
-        self.search_thread.finished.connect(self.search_finished)
-        self.search_thread.error.connect(self.search_failed)
-        self.search_thread.start()
-
-    def add_result(self, title, uploader, url, platform):
-        """Add a single search result to the list widget."""
-        if not url or url in ("NA", "None", ""):
-            return
-                
-        prefix = f"[{platform}]"
-        display = f"{prefix}{title} - {uploader}"
-            
-        item = QListWidgetItem(display)
-        item.setData(Qt.UserRole, url)
-        item.setData(Qt.UserRole + 1, platform)
-        self.result_list.addItem(item)
-
-    def search_finished(self):
-        count = self.result_list.count()
-        self.set_status(f"Search Complete: {count} results found", "#007A33") # Green
-        self.stop_button.setEnabled(False)
-
-    def stop_search(self):
-        if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.stop()
-            self.set_status("Search Stopped", "orange")
-            logger.info("Search stopped by user.")
-
-    def search_failed(self, error):
-        self.set_status(f"Search Failed: {error}", "red")
-        logger.error(f"Search error: {error}")
-        error_item = QListWidgetItem(f"Error: {error}")
-        error_item.setData(Qt.UserRole, "")
-        self.result_list.addItem(error_item)
-
-    def play_video(self, item):
-        if self.player_thread and self.player_thread.isRunning():
-            return
-
-        url = item.data(Qt.UserRole)
-
-        if not url or url in ("NA", "None"):
-            logger.warning("Invalid URL for playback")
-            self.set_status("Invalid URL", "red")
-            return
-
-        self.play_button.setEnabled(False)
-        self.set_status(f"Playing: {item.text()}", "#005A9C") # Blue
-
-        self.player_thread = VideoPlayer(
-            self.config.get("player", "mpv"),
-            url
-        )
-        self.player_thread.finished_playing.connect(
-            lambda: self.play_button.setEnabled(True)
-        )
-        self.player_thread.start()
-
-    def play_selected(self):
-        item = self.result_list.currentItem()
-        if item:
-            self.play_video(item)
-
-    def select_folder(self):
-        folder = QFileDialog.getExistingDirectory(
-            self,
-            "Select download folder"
-        )
-
-        if folder:
-            self.download_path = folder
-            self.config["download_path"] = folder
-            save_config(self.config)
-            self.path_label.setText(f"Path: {folder}")
-            logger.info(f"Download folder changed to: {folder}")
-            self.set_status(f"Folder set to: {folder}", "#007A33")
-
-    def download_selected(self):
-        if self.download_thread and self.download_thread.isRunning():
-            return
-            
-        item = self.result_list.currentItem()
-
-        if not item:
-            self.set_status("Please select a track first", "orange")
-            return
-
-        url = item.data(Qt.UserRole)
-
-        if not url or url in ("NA", "None"):
-            logger.warning("Invalid URL for download")
-            self.set_status("Invalid URL", "red")
-            return
-
-        logger.info(f"Starting download: {url}")
-        self.set_status("Downloading...", "#005A9C")
-
-        command = [
-            "yt-dlp",
-            "-x",
-            "--audio-format",
-            "mp3",
-            "--audio-quality",
-            "0",
-            "--embed-thumbnail",
-            "--embed-metadata",
-            "--no-playlist",
-        ]
-
-        if self.download_path:
-            command += [
-                "-o",
-                f"{self.download_path}/%(title)s.%(ext)s"
-            ]
-
-        command.append(url)
-
-        self.download_button.setEnabled(False)
-        self.download_button.setText("Downloading...")
-
-        self.download_thread = DownloadThread(command)
-        self.download_thread.progress.connect(
-            self.update_progress
-        )
-
-        self.download_thread.finished.connect(
-            self.after_download
-        )
-
-        self.download_thread.error.connect(
-            self.download_failed
-        )
-        
-        self.download_thread.start()
-
-    def update_progress(self, percent):
-        self.set_status(f"Downloading... {percent}%")
-        self.download_button.setText(f"Downloading... {percent}%")
-
-    def download_failed(self, error):
-        logger.error(f"Download error: {error}")
-        self.set_status(f"Download Failed: {error}", "red")
-        self.download_button.setEnabled(True)
-        self.download_button.setText("Download")
-        
-        if self.download_thread:
-            self.download_thread.wait()
-            self.download_thread = None
-
-    def after_download(self, output):
-        logger.info("Download completed successfully")
-        self.set_status("Tagging music...", "purple") # Purple for tagging phase
-
-        filepath = find_downloaded_file(output)
-
-        if not filepath:
-             logger.warning("yt-dlp did not provide a valid file path in output.")
-             self._finalize_download(None, is_error=True, error_msg="Could not determine downloaded file path")
-             return
-
-        from pathlib import Path as PPath
-        p_path = PPath(filepath)
-        if not p_path.exists() or p_path.stat().st_size == 0:
-            logger.warning(f"Downloaded file not found or empty: {filepath}")
-            self._finalize_download(None, is_error=True, error_msg="Downloaded file missing or empty")
-            return
-        
-        api_key = self.config.get("acoustid_api_key", DEFAULT_ACoustID_KEY)
-        self.tagger_thread = MusicTaggerThread(filepath, api_key=api_key)
-        
-        # Connect tagging signals
-        # We pass the current item text to show what is being tagged in status
-        current_item_text = self.result_list.currentItem().text() if self.result_list.currentItem() else "Unknown"
-        
-        self.tagger_thread.finished.connect(
-            lambda success: self._finalize_download(success, is_error=False, item_name=current_item_text)
-        )
-        self.tagger_thread.error.connect(
-            lambda error: self._finalize_download(error, is_error=True, error_msg=str(error))
-        )
-        
-        self.tagger_thread.start()
-
-    def _finalize_download(self, output=None, is_error=False, error_msg=None, item_name="Unknown"):
-        """Common cleanup and post-processing logic for download/tagging completion."""
-        
-        if is_error:
-            msg = f"Tagging Failed: {error_msg}"
-            logger.warning(f"Tagging failed for {item_name}: {output}")
-            self.set_status(msg, "red")
-        else:
-            msg = f"Success: {item_name} tagged"
-            logger.info(f"Music tagged successfully: {item_name}")
-            self.set_status(msg, "#007A33") # Green
-        
-        # M3U Rebuild
-        if self.config.get("create_m3u", True):
-            try:
-                self.m3u_thread = M3URebuildThread(self.download_path)
-                self.m3u_thread.finished.connect(
-                    lambda path: logger.info(f"M3U playlist rebuilt at: {path}")
-                )
-                self.m3u_thread.error.connect(
-                    lambda err: logger.error(f"Failed to rebuild M3U: {err}")
-                )
-                self.m3u_thread.start()
-            except Exception as e:
-                logger.error(f"Failed to start M3U rebuild thread: {e}")
-        
-        # Reset UI
-        self.download_button.setEnabled(True)
-        self.download_button.setText("Download")
-
-    def set_status(self, message, color="#007A33"):
-        """Helper to update status bar with color."""
-        self.status_label.setText(message)
-        self.status_label.setStyleSheet(f"font-weight: bold; color: {color};")
-
-    def closeEvent(self, event):
-        logger.info("Application closing...")
-        
-        if self.search_thread and self.search_thread.isRunning():
-            self.search_thread.stop()
-            
-        if self.download_thread and self.download_thread.isRunning():
-            self.download_thread.stop()
-            self.download_thread.wait()
-            
-        if self.player_thread and hasattr(self.player_thread, "_proc"):
-            try:
-                self.player_thread._proc.terminate()
-                self.player_thread._proc.wait(timeout=3)
-            except Exception:
-                pass
-            
-        if self.tagger_thread and self.tagger_thread.isRunning():
-            self.tagger_thread.wait()
-
-        if self.m3u_thread and self.m3u_thread.isRunning():
-            self.m3u_thread.wait()
-                        
-        logger.info("Threads stopped. Exiting.")
-        event.accept()
+from utils import load_config, save_config, get_library_path
+from core.tagger import MusicTagger
+from core.organizer import MusicOrganizer
+
+if getattr(sys, 'frozen', False):
+    app_dir = str(Path(sys.executable).parent)
+    os.environ["PATH"] = app_dir + os.pathsep + os.environ.get("PATH", "")
 
 def get_version():
-    version_file = Path(__file__).parent.parent / "VERSION"
+    """Read version from VERSION file"""
+    version_file = Path(__file__).resolve().parents[1] / "VERSION"
     if version_file.exists():
         return version_file.read_text().strip()
-    return "1.2.0"
+    return "1.3.0"
+
+def cmd_gui(args, config, logger):
+    """Launch GUI application"""
+    try:
+        from PySide6.QtWidgets import QApplication
+        from PySide6.QtGui import QIcon
+        from gui.main_window import MainWindow
+        app = QApplication(sys.argv)
+        app.setApplicationName("YT Music Downloader")
+        app.setApplicationVersion(get_version())
+        app.setDesktopFileName("music-downloader")
+        
+        root_dir = Path(__file__).resolve().parent.parent
+        icon_path = root_dir / "assets" / "music-downloader.png"
+        if icon_path.exists():
+            app.setWindowIcon(QIcon(str(icon_path)))
+        
+        window = MainWindow()
+        window.show()
+        
+        logger.info(f"GUI started - version {get_version()}")
+        sys.exit(app.exec())
+        
+    except ImportError as e:
+        logger.error(f"Cannot start GUI: {e}")
+        logger.error("Install GUI dependencies: pip install PySide6")
+        sys.exit(1)
+
+
+# (argparse dest, MusicTagger option key, help text) for per-run source toggles
+TAG_SOURCES = (
+    ('acoustid', 'use_acoustid', 'AcoustID fingerprint lookup'),
+    ('mb_search', 'use_musicbrainz_search', 'MusicBrainz text search fallback'),
+    ('genius', 'use_genius', 'Genius metadata fallback'),
+    ('caa', 'use_caa', 'Cover Art Archive covers'),
+    ('itunes', 'use_itunes', 'iTunes covers'),
+    ('genius_cover', 'use_genius_cover', 'Genius covers'),
+)
+
+
+def _tagger_options(args, config):
+    """Config toggles, overridden by any --flag / --no-flag given on the command line"""
+    options = MusicTagger.options_from_config(config)
+    for dest, key, _ in TAG_SOURCES:
+        value = getattr(args, dest, None)
+        if value is not None:
+            options[key] = value
+    return options
+
+
+def _build_organize_hook(config, logger, organize=None, library=None):
+    """Return a callable that moves a tagged file into the library, or None when disabled"""
+    if organize is None:
+        organize = config.get('organize_after_tag', False)
+    if not organize:
+        return None
+    organizer = MusicOrganizer(library or get_library_path(config), logger=logger)
+    return lambda filepath: organizer.organize_file(Path(filepath))
+
+
+def cmd_tag(args, config, logger):
+    """Tag audio files with metadata"""
+    tagger = MusicTagger(
+        logger=logger,
+        acoustid_key=config.get('acoustid_api_key'),
+        genius_token=config.get('genius_token'),
+        options=_tagger_options(args, config)
+    )
+    organize_hook = _build_organize_hook(config, logger, args.organize, args.library)
+
+    path = Path(args.path)
+    
+    if not path.exists():
+        logger.error(f"Path not found: {path}")
+        sys.exit(1)
+    
+    if path.is_dir():
+        results = tagger.process_directory(
+            str(path),
+            recursive=args.recursive,
+            on_success=organize_hook
+        )
+        logger.info(f"Complete: {results['success']} success, {results['failed']} failed")
+        sys.exit(0 if results['failed'] == 0 else 1)
+    else:
+        success = tagger.process_file(str(path))
+        if success and organize_hook:
+            organize_hook(str(path))
+        sys.exit(0 if success else 1)
+
+
+def cmd_organize(args, config, logger):
+    """Move tagged audio files into the Artist/Album/NN - Title layout"""
+    source = Path(args.source)
+    if not source.is_dir():
+        logger.error(f"Folder not found: {source}")
+        sys.exit(1)
+
+    library = args.library or get_library_path(config)
+    organizer = MusicOrganizer(library, logger=logger, move=not args.copy)
+    organizer.organize_directory(str(source), recursive=not args.no_recursive)
+
+def cmd_config(args, config, logger):
+    """View or modify configuration"""
+    if args.list:
+        # List all config
+        print("\nCurrent configuration:")
+        print(f"  Config file: {Path.home() / '.config' / 'ytmusicdl' / 'config.json'}")
+        print("\nSettings:")
+        for key, value in sorted(config.items()):
+            # Hide sensitive tokens
+            if 'token' in key.lower() and value:
+                display_value = value[:10] + "..." if len(value) > 10 else "***"
+            elif 'key' in key.lower() and value and value != "v8pQ6oyB":
+                display_value = value[:10] + "..." if len(value) > 10 else "***"
+            else:
+                display_value = value
+            print(f"  {key}: {display_value}")
+        print()
+        return
+    
+    if args.get:
+        # Get specific key
+        value = config.get(args.get)
+        if value is None:
+            logger.error(f"Key not found: {args.get}")
+            logger.info(f"Available keys: {', '.join(config.keys())}")
+            sys.exit(1)
+        print(value)
+        return
+    
+    if args.set:
+        # Set key=value
+        try:
+            key, value = args.set.split('=', 1)
+            key = key.strip()
+            value = value.strip()
+            
+            # Type conversion
+            if value.lower() == 'true':
+                value = True
+            elif value.lower() == 'false':
+                value = False
+            elif value.isdigit():
+                value = int(value)
+            
+            config[key] = value
+            save_config(config)
+            logger.info(f"✓ Set {key} = {value}")
+            logger.info(f"  Config saved to: {Path.home() / '.config' / 'ytmusicdl' / 'config.json'}")
+        except ValueError:
+            logger.error("Invalid format. Use: key=value")
+            logger.info("Example: python ytmusicdl.py config --set genius_token=YOUR_TOKEN")
+            sys.exit(1)
+        return
+    
+    # No action specified
+    logger.error("Specify --list, --get KEY, or --set KEY=VALUE")
+    logger.info("Examples:")
+    logger.info("  python ytmusicdl.py config --list")
+    logger.info("  python ytmusicdl.py config --get genius_token")
+    logger.info("  python ytmusicdl.py config --set genius_token=YOUR_TOKEN")
+    sys.exit(1)
+
+
+def cmd_download(args, config, logger):
+    """Download music from URL"""
+    import subprocess
+    
+    download_path = Path(args.output) if args.output else Path(config.get('download_path'))
+    download_path.mkdir(parents=True, exist_ok=True)
+    
+    command = [
+        "yt-dlp",
+        "-x",
+        "--audio-format", "mp3",
+        "--audio-quality", "0",
+        "--embed-thumbnail",
+        "--embed-metadata",
+        "--no-playlist",
+        "-o", str(download_path / "%(title)s.%(ext)s"),
+        args.url
+    ]
+    
+    logger.info(f"Downloading: {args.url}")
+    logger.info(f"Output: {download_path}")
+    
+    try:
+        result = subprocess.run(command, check=True, capture_output=True, text=True)
+        logger.info("✓ Download complete")
+        
+        # Auto-tag if requested
+        if args.tag:
+            logger.info("Tagging downloaded file...")
+            # Find most recently created MP3 in download dir
+            mp3_files = sorted(download_path.glob("*.mp3"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if mp3_files:
+                latest_file = mp3_files[0]
+                tagger = MusicTagger(
+                    logger=logger,
+                    acoustid_key=config.get('acoustid_api_key'),
+                    genius_token=config.get('genius_token'),
+                    options=MusicTagger.options_from_config(config)
+                )
+                if tagger.process_file(str(latest_file)):
+                    logger.info(f"✓ Tagged: {latest_file.name}")
+                    organize_hook = _build_organize_hook(config, logger)
+                    if organize_hook:
+                        organize_hook(str(latest_file))
+                else:
+                    logger.warning("Tagging failed")
+            else:
+                logger.warning("No MP3 file found to tag")
+        
+        sys.exit(0)
+    except subprocess.CalledProcessError as e:
+        logger.error(f"Download failed: {e}")
+        if e.stderr:
+            logger.error(e.stderr)
+        sys.exit(1)
+    except FileNotFoundError:
+        logger.error("yt-dlp not found. Install with: pip install yt-dlp")
+        sys.exit(1)
+
+def main():
+    """Main CLI entry point"""
+    parser = argparse.ArgumentParser(
+        prog='ytmusicdl',
+        description='YouTube Music Downloader with auto-tagging',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  %(prog)s                              # Launch GUI (default)
+  %(prog)s gui                          # Launch GUI explicitly
+  %(prog)s download <url>               # Download from URL
+  %(prog)s download <url> --tag         # Download and auto-tag
+  %(prog)s tag song.mp3                 # Tag single file
+  %(prog)s tag /music -r                # Tag directory recursively
+  %(prog)s config --set genius_token=XXX # Set Genius API token
+  %(prog)s config --list                # Show all settings
+  %(prog)s tag /music -r --no-acoustid  # Tag without fingerprint lookup
+  %(prog)s organize /music/inbox        # Move tagged files into Artist/Album/NN - Title
+
+Configuration:
+  Config file: ~/.config/ytmusicdl/config.json
+  
+  Set Genius token:
+    1. Get token: https://genius.com/api-clients
+    2. Set it: %(prog)s config --set genius_token=YOUR_TOKEN
+  
+  Set AcoustID key (optional):
+    1. Get key: https://acoustid.org/api-key  
+    2. Set it: %(prog)s config --set acoustid_api_key=YOUR_KEY
+        """
+    )
+    
+    parser.add_argument('-v', '--version', action='version', version=f'%(prog)s {get_version()}')
+    parser.add_argument('--verbose', action='store_true', help='Enable debug logging')
+    parser.add_argument('--quiet', action='store_true', help='Only show errors')
+    
+    subparsers = parser.add_subparsers(dest='command', help='Commands')
+    
+    # GUI command
+    subparsers.add_parser('gui', help='Launch graphical interface (default)')
+    
+    # Download command
+    download_parser = subparsers.add_parser('download', help='Download music from URL')
+    download_parser.add_argument('url', help='YouTube or SoundCloud URL')
+    download_parser.add_argument('-o', '--output', help='Output directory (default: config download_path)')
+    download_parser.add_argument('-t', '--tag', action='store_true', help='Auto-tag after download')
+    
+    # Tag command
+    tag_parser = subparsers.add_parser('tag', help='Tag audio files with metadata')
+    tag_parser.add_argument('path', help='File or directory to tag')
+    tag_parser.add_argument('-r', '--recursive', action='store_true', help='Scan subdirectories')
+
+    for dest, _, help_text in TAG_SOURCES:
+        tag_parser.add_argument(
+            '--' + dest.replace('_', '-'),
+            dest=dest,
+            action=argparse.BooleanOptionalAction,
+            default=None,
+            help=f'{help_text} (default: from config)'
+        )
+    tag_parser.add_argument(
+        '--organize',
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help='Move tagged files into Artist/Album/NN - Title (default: from config)'
+    )
+    tag_parser.add_argument('-l', '--library', help='Library root for --organize (default: library_path or download_path)')
+
+    # Organize command
+    organize_parser = subparsers.add_parser('organize', help='Move tagged files into Artist/Album/NN - Title')
+    organize_parser.add_argument('source', help='Folder containing tagged audio files')
+    organize_parser.add_argument('-l', '--library', help='Library root (default: library_path or download_path)')
+    organize_parser.add_argument('--copy', action='store_true', help='Copy instead of move')
+    organize_parser.add_argument('--no-recursive', action='store_true', help='Do not scan subfolders')
+    
+    # Config command
+    config_parser = subparsers.add_parser('config', help='View or modify configuration')
+    config_group = config_parser.add_mutually_exclusive_group(required=True)
+    config_group.add_argument('--list', action='store_true', help='List all settings')
+    config_group.add_argument('--get', metavar='KEY', help='Get specific setting')
+    config_group.add_argument('--set', metavar='KEY=VALUE', help='Set configuration value')
+    
+    args = parser.parse_args()
+    
+    # Setup logging
+    if args.verbose:
+        log_level = logging.DEBUG
+    elif args.quiet:
+        log_level = logging.ERROR
+    else:
+        log_level = logging.INFO
+    
+    logger = configure_logging(level=log_level)
+    
+    # Load config
+    config = load_config()
+    
+    # Route to command (default to GUI if none specified)
+    command = args.command or 'gui'
+    
+    commands = {
+        'gui': cmd_gui,
+        'download': cmd_download,
+        'tag': cmd_tag,
+        'config': cmd_config,
+        'organize': cmd_organize,
+    }
+    
+    handler = commands.get(command)
+    if handler:
+        try:
+            handler(args, config, logger)
+        except KeyboardInterrupt:
+            logger.info("\nInterrupted by user")
+            sys.exit(130)
+        except Exception as e:
+            logger.exception(f"Unexpected error: {e}")
+            sys.exit(1)
+    else:
+        parser.print_help()
+        sys.exit(1)
 
 if __name__ == '__main__':
-    app = QApplication(sys.argv)
-    app.setApplicationName("Yt Music Downloader")
-    app.setDesktopFileName("music-downloader")
-    app.setApplicationDisplayName("Music Downloader")
-    app.setApplicationVersion(get_version())
-    
-    # Set application icon if available
-    icon_path = "resources/icon.png"
-    if Path(icon_path).exists():
-        app.setWindowIcon(QIcon(icon_path))
+    main()
 
-    window = MainWindow()
-    window.show()
-    sys.exit(app.exec())

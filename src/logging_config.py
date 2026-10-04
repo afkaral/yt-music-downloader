@@ -65,9 +65,10 @@ def configure_logging(debug: bool = False, level: int = None) -> logging.Logger:
         
     logger.setLevel(logging.DEBUG)  # Keep root at DEBUG so handlers can filter
 
-    # Remove any existing handlers
-    for handler in list(logger.handlers):
-        logger.removeHandler(handler)
+    # Remove any existing handlers to avoid duplicates
+    if logger.handlers:
+        for handler in list(logger.handlers):
+            logger.removeHandler(handler)
 
     # Console Handler
     console_handler = logging.StreamHandler(sys.stdout)

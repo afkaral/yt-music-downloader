@@ -3,8 +3,9 @@
 
 set -e
 
+PROJECT_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 APP_NAME="MusicDownloader"
-VERSION=$(cat VERSION 2>/dev/null | tr -d '\r\n' || echo "1.2.1")
+VERSION=$(cat "$PROJECT_ROOT/VERSION" 2>/dev/null || echo "1.3.0")
 APPDIR="${APP_NAME}.AppDir"
 OUTPUT_NAME="${APP_NAME}-${VERSION}-x86_64.AppImage"
 
@@ -21,7 +22,7 @@ mkdir -p "$APPDIR/usr/share/applications"
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
 
 # Copy source files
-cp src/*.py "$APPDIR/usr/lib/music-downloader/"
+cp -r src/* "$APPDIR/usr/lib/music-downloader/"
 
 # Create launcher script
 cat > "$APPDIR/usr/bin/music-downloader" << 'EOF'
@@ -32,10 +33,10 @@ EOF
 chmod 755 "$APPDIR/usr/bin/music-downloader"
 
 # Copy desktop file and icon
-cp assets/music-downloader.desktop "$APPDIR/"
-cp assets/music-downloader.desktop "$APPDIR/usr/share/applications/"
-cp assets/music-downloader.png "$APPDIR/"
-cp assets/music-downloader.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
+cp "$PROJECT_ROOT/assets/music-downloader.desktop" "$APPDIR/"
+cp "$PROJECT_ROOT/assets/music-downloader.desktop" "$APPDIR/usr/share/applications/"
+cp "$PROJECT_ROOT/assets/music-downloader.png" "$APPDIR/"
+cp "$PROJECT_ROOT/assets/music-downloader.png" "$APPDIR/usr/share/icons/hicolor/256x256/apps/"
 
 # Create AppRun
 cat > "$APPDIR/AppRun" << 'EOF'

@@ -1,5 +1,5 @@
 pkgname=music-downloader
-pkgver=1.2.1
+pkgver=1.3.0
 pkgrel=1
 pkgdesc="YouTube music downloader with automatic MusicBrainz tagging and playlist support"
 arch=('any')
@@ -12,7 +12,6 @@ depends=(
     python-mutagen
     yt-dlp
     ffmpeg
-    mpv
     chromaprint
 )
 source=("${url}/archive/refs/tags/v${pkgver}-${pkgrel}.tar.gz")
@@ -23,7 +22,7 @@ package() {
 
     # Python modules
     install -d "$pkgdir/usr/lib/music-downloader"
-    install -m644 src/*.py "$pkgdir/usr/lib/music-downloader/"
+    cp -r src/* "$pkgdir/usr/lib/music-downloader/"
 
     # Wrapper executable in $PATH
     install -d "$pkgdir/usr/bin"
