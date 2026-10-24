@@ -135,13 +135,14 @@ Library/
 - Albums are grouped by album artist and cleaned album title. The year is ignored, so a remaster or reissue lands in the same folder as the original.
 - Characters that are illegal on NTFS and FAT are removed from folder and file names.
 - If a target file name already exists, `(2)`, `(3)` and so on is appended.
-- Files missing an artist, album or title tag are skipped and left where they are. A single without an album tag is therefore not moved.
+- Files missing an artist or title tag are skipped and left where they are. A file with no album tag is placed in a folder named after its title.s
 - Files are moved by default. `--copy` copies instead.
 
 ## Behavior you may not want
 
 These are deliberate, to keep Navidrome from splitting albums:
 
+- If no source provides an album, the track title is used as the album.
 - MusicBrainz IDs, barcode, catalog number, AcoustID tags, disc number and disc subtitle are removed from the files.
 - Track numbers continue across discs of a multi-disc release.
 - Disambiguation such as `(TUR)` or `(2)` is stripped from artist names. The album artist is the primary artist without featured artists.

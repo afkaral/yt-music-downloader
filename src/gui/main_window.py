@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QListWidget, 
     QListWidgetItem, QFileDialog, QHBoxLayout,
     QDialog, QComboBox, QSpinBox, QCheckBox,
-    QTabWidget, QMessageBox,
+    QTabWidget, QMessageBox, QTextEdit,
 )
 from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt
@@ -25,6 +25,7 @@ try:
         MusicTaggerThread,
         M3URebuildThread,
         OrganizeThread,
+        FolderTaggerThread,
     )
 except ImportError:
     from utils import load_config, save_config, find_downloaded_file, get_library_path
@@ -35,11 +36,54 @@ except ImportError:
         MusicTaggerThread,
         M3URebuildThread,
         OrganizeThread,
+        FolderTaggerThread,
     )
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_ACOUSTID_KEY = "v8pQ6oyB"
+
+
+class TaggingLogDialog(QDialog):
+    """Popup dialog showing tagging progress and log"""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Tagging Progress")
+        self.resize(600, 400)
+        self._setup_ui()
+    
+    def _setup_ui(self):
+        layout = QVBoxLayout(self)
+        
+        self.status_label = QLabel("Initializing...")
+        self.status_label.setStyleSheet("font-weight: bold; font-size: 14px;")
+        layout.addWidget(self.status_label)
+        
+        self.log_text = QTextEdit()
+        self.log_text.setReadOnly(True)
+        self.log_text.setStyleSheet("font-family: monospace; font-size: 12px;")
+        layout.addWidget(self.log_text)
+        
+        self.close_button = QPushButton("Close")
+        self.close_button.clicked.connect(self.accept)
+        self.close_button.setEnabled(False)
+        layout.addWidget(self.close_button)
+    
+    def append_log(self, message):
+        """Append message to log"""
+        self.log_text.append(message)
+        self.log_text.verticalScrollBar().setValue(
+            self.log_text.verticalScrollBar().maximum()
+        )
+    
+    def set_status(self, message):
+        """Update status label"""
+        self.status_label.setText(message)
+    
+    def enable_close(self):
+        """Enable close button when done"""
+        self.close_button.setEnabled(True)
 
 def get_app_icon() -> QIcon:
     """
@@ -162,10 +206,10 @@ class SettingsDialog(QDialog):
         tab = QWidget()
         layout = QVBoxLayout(tab)
 
-        layout.addWidget(QLabel("Library folder (empty = use the download folder)"))
+        layout.addWidget(QLabel("Library folder (required for organizing)"))
         lib_layout = QHBoxLayout()
         self.library_path = QLineEdit(self.config.get("library_path", ""))
-        self.library_path.setPlaceholderText("Same as download folder")
+        self.library_path.setPlaceholderText("Root folder of the organized library")
         browse = QPushButton("...")
         browse.clicked.connect(lambda: self._browse_into(self.library_path, "Select library folder"))
         lib_layout.addWidget(self.library_path)
@@ -218,6 +262,7 @@ class MainWindow(QWidget):
         self.m3u_thread = None
         self.m3u_thread_auto = None
         self.organize_thread = None
+        self.folder_tagger_thread = None
         
         self._setup_ui()
 
@@ -275,6 +320,10 @@ class MainWindow(QWidget):
         self.tag_button.clicked.connect(self.tag_file)
         self.tag_button.setToolTip("Tag a music file with metadata")
         
+        self.tag_folder_button = QPushButton("📁 Tag Folder")
+        self.tag_folder_button.clicked.connect(self.tag_folder)
+        self.tag_folder_button.setToolTip("Tag all music files in a folder")
+        
         self.rebuild_m3u_button = QPushButton("📝 Build M3U")
         self.rebuild_m3u_button.clicked.connect(self.rebuild_m3u_manual)
         self.rebuild_m3u_button.setToolTip("Build M3U playlist for download folder")
@@ -284,6 +333,7 @@ class MainWindow(QWidget):
         self.organize_button.setToolTip("Move tagged files into Artist/Album/NN - Title in the library folder")
         
         button_layout2.addWidget(self.tag_button)
+        button_layout2.addWidget(self.tag_folder_button)
         button_layout2.addWidget(self.organize_button)
         button_layout2.addWidget(self.rebuild_m3u_button)
         layout.addLayout(button_layout2)
@@ -448,6 +498,92 @@ class MainWindow(QWidget):
         self.tag_button.setEnabled(True)
         self.tag_button.setText("🏷 Tag File")
     
+    def tag_folder(self):
+        """Open folder dialog and tag all audio files with progress popup"""
+        folder_path = QFileDialog.getExistingDirectory(
+            self,
+            "Select Folder to Tag",
+            self.download_path
+        )
+        
+        if not folder_path:
+            return
+        
+        if self.folder_tagger_thread and self.folder_tagger_thread.isRunning():
+            self.set_status("Folder tagging already in progress", "orange")
+            return
+        
+        # Ask if recursive
+        answer = QMessageBox.question(
+            self,
+            "Recursive Tagging",
+            f"Tag files in:\n{folder_path}\n\nInclude subfolders?",
+            QMessageBox.Yes | QMessageBox.No | QMessageBox.Cancel
+        )
+        
+        if answer == QMessageBox.Cancel:
+            return
+        
+        recursive = (answer == QMessageBox.Yes)
+        
+        logger.info(f"Folder tagging: {folder_path} (recursive={recursive})")
+        self.set_status(f"Tagging folder{'(recursive)' if recursive else ''}...", "purple")
+        
+        # Create and show progress dialog
+        self.tagging_log_dialog = TaggingLogDialog(self)
+        self.tagging_log_dialog.set_status(f"Tagging folder: {Path(folder_path).name}")
+        self.tagging_log_dialog.append_log(f"Starting folder tag: {folder_path}")
+        self.tagging_log_dialog.append_log(f"Recursive: {recursive}")
+        self.tagging_log_dialog.append_log("")
+        
+        # Disable folder tag button
+        self.tag_folder_button.setEnabled(False)
+        self.tag_folder_button.setText("Tagging...")
+        
+        # Start tagging thread
+        self.folder_tagger_thread = FolderTaggerThread(folder_path, self.config, recursive)
+        self.folder_tagger_thread.progress.connect(self._on_folder_tag_progress)
+        self.folder_tagger_thread.finished.connect(self._on_folder_tag_complete)
+        self.folder_tagger_thread.error.connect(self._on_folder_tag_error)
+        self.folder_tagger_thread.start()
+        
+        # Show dialog (non-modal)
+        self.tagging_log_dialog.show()
+    
+    def _on_folder_tag_progress(self, message):
+        """Handle folder tagging progress update"""
+        if hasattr(self, 'tagging_log_dialog'):
+            self.tagging_log_dialog.append_log(message)
+    
+    def _on_folder_tag_complete(self, success, failed):
+        """Handle folder tagging completion"""
+        total = success + failed
+        self.set_status(f"✓ Folder tagged: {success}/{total} success", "#007A33")
+        logger.info(f"Folder tagging complete: {success} success, {failed} failed")
+        
+        if hasattr(self, 'tagging_log_dialog'):
+            self.tagging_log_dialog.append_log("")
+            self.tagging_log_dialog.append_log(f"Complete: {success} success, {failed} failed")
+            self.tagging_log_dialog.set_status(f"Complete: {success}/{total} success")
+            self.tagging_log_dialog.enable_close()
+        
+        self.tag_folder_button.setEnabled(True)
+        self.tag_folder_button.setText("📁 Tag Folder")
+    
+    def _on_folder_tag_error(self, error):
+        """Handle folder tagging error"""
+        self.set_status(f"✗ Folder tagging failed: {error}", "red")
+        logger.error(f"Folder tagging error: {error}")
+        
+        if hasattr(self, 'tagging_log_dialog'):
+            self.tagging_log_dialog.append_log("")
+            self.tagging_log_dialog.append_log(f"ERROR: {error}")
+            self.tagging_log_dialog.set_status("Failed")
+            self.tagging_log_dialog.enable_close()
+        
+        self.tag_folder_button.setEnabled(True)
+        self.tag_folder_button.setText("📁 Tag Folder")
+    
     def organize_library(self):
         """Pick a folder and move its tagged audio files into the library layout"""
         if self.organize_thread and self.organize_thread.isRunning():
@@ -459,6 +595,9 @@ class MainWindow(QWidget):
             return
 
         library = get_library_path(self.config)
+        if not library:
+            QMessageBox.warning(self, "Organize library", "Set the library folder in Settings > Library first.")
+            return
         answer = QMessageBox.question(
             self,
             "Organize library",
@@ -708,6 +847,9 @@ class MainWindow(QWidget):
 
         if self.organize_thread and self.organize_thread.isRunning():
             self.organize_thread.wait()
+        
+        if self.folder_tagger_thread and self.folder_tagger_thread.isRunning():
+            self.folder_tagger_thread.wait()
                     
         logger.info("Threads stopped. Exiting.")
         event.accept()

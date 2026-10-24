@@ -133,4 +133,4 @@ def save_config(cfg: dict) -> None:
 
 def get_library_path(config: dict) -> str:
     """Library root: the dedicated setting, falling back to the download folder."""
-    return config.get("library_path") or config.get("download_path", str(Path.home() / "Music"))
+    return config.get("library_path", "").strip()

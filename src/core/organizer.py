@@ -32,9 +32,11 @@ class MusicOrganizer:
 
     SUPPORTED_FORMATS = MusicTagger.SUPPORTED_FORMATS
 
-    def __init__(self, library_root: str, logger: logging.Logger = None, move: bool = True):
+    def __init__(self, library_root: str, logger: logging.Logger = None, move: bool = True,
+                 dry_run: bool = False):
         self.library_root = Path(library_root)
         self.move = move
+        self.dry_run = dry_run
         self.logger = logger or logging.getLogger(__name__)
         if not self.logger.handlers and not logging.getLogger().handlers:
             handler = logging.StreamHandler()
@@ -73,7 +75,11 @@ class MusicOrganizer:
         title = first('title')
         tracknumber = first('tracknumber')
 
-        if not artist or not album or not title:
+        # No album tag: use the title, same rule the tagger applies
+        if not album and artist and title:
+            album = title
+
+        if not artist or not title:
             self.logger.warning(f"Missing artist/album/title tags: {filepath.name}")
             return None
 
@@ -156,6 +162,11 @@ class MusicOrganizer:
             return target
 
         target = self._resolve_collision(target)
+
+        if self.dry_run:
+            self.logger.info(f"Would {'move' if self.move else 'copy'}: {filepath} -> {target}")
+            return target
+
         target.parent.mkdir(parents=True, exist_ok=True)
 
         try:

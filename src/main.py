@@ -90,7 +90,11 @@ def _build_organize_hook(config, logger, organize=None, library=None):
         organize = config.get('organize_after_tag', False)
     if not organize:
         return None
-    organizer = MusicOrganizer(library or get_library_path(config), logger=logger)
+    library = library or get_library_path(config)
+    if not library:
+        logger.error("No library folder set: pass --library or set library_path")
+        sys.exit(1)
+    organizer = MusicOrganizer(library, logger=logger)
     return lambda filepath: organizer.organize_file(Path(filepath))
 
 
@@ -133,7 +137,10 @@ def cmd_organize(args, config, logger):
         sys.exit(1)
 
     library = args.library or get_library_path(config)
-    organizer = MusicOrganizer(library, logger=logger, move=not args.copy)
+    if not library:
+        logger.error("No library folder set: pass --library or set library_path")
+        sys.exit(1)
+    organizer = MusicOrganizer(library, logger=logger, move=not args.copy, dry_run=args.dry_run)
     organizer.organize_directory(str(source), recursive=not args.no_recursive)
 
 def cmd_config(args, config, logger):
@@ -332,7 +339,8 @@ Configuration:
     organize_parser.add_argument('-l', '--library', help='Library root (default: library_path or download_path)')
     organize_parser.add_argument('--copy', action='store_true', help='Copy instead of move')
     organize_parser.add_argument('--no-recursive', action='store_true', help='Do not scan subfolders')
-    
+    organize_parser.add_argument('--dry-run', action='store_true', help='Only print what would be moved')
+
     # Config command
     config_parser = subparsers.add_parser('config', help='View or modify configuration')
     config_group = config_parser.add_mutually_exclusive_group(required=True)

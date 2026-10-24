@@ -22,6 +22,7 @@ class PlayerSignals(QObject):
     time_updated = Signal(float)
     duration_updated = Signal(float)
     playback_ended = Signal()
+    error_occurred = Signal(str)
 
 
 class AudioPlayerWidget(QWidget):
@@ -37,11 +38,13 @@ class AudioPlayerWidget(QWidget):
         self._signals.time_updated.connect(self._on_time_updated)
         self._signals.duration_updated.connect(self._on_duration_updated)
         self._signals.playback_ended.connect(self._on_playback_ended)
+        self._signals.error_occurred.connect(self._on_error)
 
         self._player = MpvPlayer(
             on_time_pos=self._signals.time_updated.emit,
             on_duration=self._signals.duration_updated.emit,
-            on_end_file=self._signals.playback_ended.emit
+            on_end_file=self._signals.playback_ended.emit,
+            on_error=self._signals.error_occurred.emit
         )
 
         self._setup_ui()
@@ -159,6 +162,13 @@ class AudioPlayerWidget(QWidget):
         self.seek_slider.setValue(0)
         self.current_time_label.setText("0:00")
 
+    def _on_error(self, message: str):
+        """Handle mpv error messages.
+        Currently log and update UI label.
+        """
+        logger.error(f"MPV error: {message}")
+        # Show error in title label temporarily
+        self.title_label.setText(f"Error: {message}")
     def _on_seek_pressed(self):
         self._is_seeking = True
 
@@ -175,3 +185,4 @@ class AudioPlayerWidget(QWidget):
     def cleanup(self):
         """Terminate mpv on window close."""
         self._player.terminate()
+

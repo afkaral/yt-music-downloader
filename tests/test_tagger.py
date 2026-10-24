@@ -46,3 +46,13 @@ def test_build_genius_metadata(tagger):
     assert metadata["artist"] == "Underground Band"
     assert metadata["producer"] == "Producer X"
     assert metadata["writer"] == "Writer Y"
+
+@pytest.mark.parametrize("raw,expected", [
+    ("Sanatçı - Şarkı", ("Sanatçı", "Şarkı")),
+    ("Pusat & Beta - Seda Saian ( Saian Diss )", ("Pusat & Beta", "Seda Saian ( Saian Diss )")),
+    ("Sanatçı ~~ Şarkı", ("Sanatçı", "Şarkı")),
+    ("Sanatçı - Şarkı (Official Music Video)", ("Sanatçı", "Şarkı")),
+    ("Şarkı (Original)", None),
+])
+def test_parse_artist_title(tagger, raw, expected):
+    assert tagger.parse_artist_title(raw) == expected

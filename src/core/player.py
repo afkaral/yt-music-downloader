@@ -27,10 +27,12 @@ class MpvPlayer:
 
     def __init__(self, on_time_pos: Optional[Callable[[float], None]] = None,
                  on_duration: Optional[Callable[[float], None]] = None,
-                 on_end_file: Optional[Callable[[], None]] = None):
+                 on_end_file: Optional[Callable[[], None]] = None,
+                 on_error: Optional[Callable[[str], None]] = None):
         self.on_time_pos = on_time_pos
         self.on_duration = on_duration
         self.on_end_file = on_end_file
+        self.on_error = on_error
         self._mpv = None
         self._current_url = None
         self._init_mpv()
@@ -44,7 +46,7 @@ class MpvPlayer:
                 video=False,
                 audio_display=False,
                 ytdl=True,
-                loglevel="error"
+                loglevel="info"
             )
 
             @self._mpv.property_observer("time-pos")
@@ -61,6 +63,16 @@ class MpvPlayer:
             def _end_file_cb(_event):
                 if self.on_end_file:
                     self.on_end_file()
+
+            @self._mpv.event_callback("log-message")
+            def _log_message_cb(event):
+                # event dict contains "level" and "text"
+                if isinstance(event, dict) and event.get("level") == "error":
+                    err_msg = event.get("text", "unknown error")
+                    if self.on_error:
+                        self.on_error(err_msg)
+                    else:
+                        logger.error(f"MPV error: {err_msg}")
 
         except Exception as e:
             logger.error(f"Failed to initialize python-mpv: {e}")
@@ -81,7 +93,10 @@ class MpvPlayer:
             self._mpv.loadfile(url, "replace")
             logger.info(f"Playback started for: {url}")
         except Exception as e:
-            logger.error(f"Error loading URL into mpv: {e}")
+            err_msg = f"Error loading URL into mpv: {e}"
+            logger.error(err_msg)
+            if self.on_error:
+                self.on_error(err_msg)
 
     def toggle_pause(self) -> bool:
         """Toggle play/pause state. Returns True if now paused."""

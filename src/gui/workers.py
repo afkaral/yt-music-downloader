@@ -262,7 +262,13 @@ class MusicTaggerThread(QThread):
                 return
 
             # Move the freshly tagged file into Artist/Album/NN - Title
-            organizer = MusicOrganizer(get_library_path(self.config), logger=logger)
+            
+            library = get_library_path(self.config)
+            if not library:
+                self.finished.emit("Tagging complete (not organized: no library folder set)")
+                return
+
+            organizer = MusicOrganizer(library, logger=logger)
             target = organizer.organize_file(Path(self.file_path))
             if target:
                 self.finished.emit(f"Tagged and organized: {target}")
@@ -377,5 +383,46 @@ class OrganizeThread(QThread):
         except Exception as e:
             logger.error(f"Organize error: {e}")
             self.error.emit(str(e))
+
+
+class FolderTaggerThread(QThread):
+    progress = Signal(str)  # current file being processed
+    finished = Signal(int, int)  # success, failed
+    error = Signal(str)
+    
+    def __init__(self, folder_path, config, recursive=False):
+        super().__init__()
+        self.folder_path = folder_path
+        self.config = config
+        self.recursive = recursive
+
+    def run(self):
+        try:
+            logger.info(f"Starting folder tagging: {self.folder_path} (recursive={self.recursive})")
+            
+            tagger = MusicTagger(
+                logger=logger,
+                acoustid_key=self.config.get("acoustid_api_key"),
+                genius_token=self.config.get("genius_token"),
+                options=MusicTagger.options_from_config(self.config)
+            )
+            
+            def on_file_success(filepath):
+                self.progress.emit(f"✓ {Path(filepath).name}")
+            
+            results = tagger.process_directory(
+                self.folder_path,
+                recursive=self.recursive,
+                on_success=on_file_success
+            )
+            
+            self.finished.emit(results['success'], results['failed'])
+                
+        except Exception as e:
+            logger.error(f"Folder tagging critical error: {e}")
+            import traceback
+            logger.debug(traceback.format_exc())
+            self.error.emit(str(e))
+
 
 PicardTaggingThread = MusicTaggerThread

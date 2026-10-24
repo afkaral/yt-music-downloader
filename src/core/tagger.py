@@ -94,11 +94,40 @@ class MusicTagger:
     # words like "Pre-Deluxe" are not cut in the middle.
     ALBUM_NOISE_RE = re.compile(
         r'(?:\s+[-–—]\s*|\s*[\(\[\{]\s*)'
-        r'(?:\d{4}\s*edit|remaster(?:ed)?|deluxe|edition|cd\s*\d+|disc\s*\d+)'
+        r'(?:\d{4}\s*edit|remaster(?:ed)?|best|deluxe|edition|cd\s*\d+|disc\s*\d+)'
         r'[\)\]\}]?.*$',
         flags=re.IGNORECASE
     )
-    
+    NOISE_BRACKET_RE = re.compile(
+        r'\s*[\(\[\{][^\)\]\}]*?\b(?:official|resmi|music\s*video|video\s*klip|klip|lyrics?|sözleri|'
+        r'sozleri|audio|original|vevo|visualizer|clip|prod\.|hd|hq|4k|mv|remaster(?:ed)?)[^\)\]\}]*[\)\]\}]\s*',
+        flags=re.IGNORECASE
+    )
+    TITLE_SEPARATOR_RE = re.compile(r'\s+[-–—]\s+|\s*~+\s*|\s+\|\s+')
+    ARTIST_JOIN_RE = re.compile(
+        r'\s*(?:&|,|;|\bx\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\band\b|\bve\b)\s*',
+        flags=re.IGNORECASE
+    )
+    CHANNEL_SUFFIX_RE = re.compile(r'\s*-\s*topic$|\s*vevo$', flags=re.IGNORECASE)
+    # Publisher / media channel names that are never a real track artist
+    NON_ARTIST_NAMES = {
+        'genius', 'genius türkiye', 'genius turkiye', 'genius japan', 'genius romanizations',
+        'spotify', 'apple music', 'youtube music', 'vevo', 'topic', 'various artists',
+    }
+
+    # Release secondary types that mean "not the original album"
+    NON_ORIGINAL_RELEASE_TYPES = {
+        'compilation', 'mixtape/street', 'live', 'remix', 'dj-mix', 'djmix',
+        'demo', 'interview', 'spokenword', 'audio drama', 'karaoke',
+    }
+
+    # Titles that signal a list, chart, schedule or guide rather than a song
+    NON_SONG_TITLE_RE = re.compile(
+        r'\b(?:diskografi|discography|liste|listesi|takvim|top\s*\d+|best of all time|'
+        r'tekli\s+yayınlama|playlist|rehber|guide|ranking|sıralama)\b',
+        flags=re.IGNORECASE
+    )
+
     def __init__(self, logger: logging.Logger = None, acoustid_key: str = None, genius_token: str = None,
                  options: Optional[Dict] = None):
         """
@@ -234,6 +263,11 @@ class MusicTagger:
                 f"albumartist -> '{meta.get('albumartist')}'"
             )
 
+        # No source gave an album: use the title so the track is not left without one
+        if (not meta.get('album') and meta.get('title') and meta.get('artist')
+                and meta['artist'] != 'Unknown Artist' and meta['title'] != 'Unknown Title'):
+            meta['album'] = meta['title']
+
         # Album: strip publisher / re-issue noise
         if meta.get('album'):
             album_clean = self._clean_album_name(meta['album'])
@@ -342,13 +376,58 @@ class MusicTagger:
             self.logger.debug(f"Fingerprint extraction failed: {e}")
             return None
 
+    def _release_sort_key(self, primary_type: str, secondary_types: List[str], date: str) -> tuple:
+        """Lower is better: albums first, non-compilation first, then the earliest date"""
+        primary = (primary_type or '').lower()
+        secondary = {s.lower() for s in (secondary_types or [])}
+        type_rank = 0 if primary == 'album' else (1 if primary == 'ep' else 2)
+        bad_rank = 1 if secondary & self.NON_ORIGINAL_RELEASE_TYPES else 0
+        return (type_rank, bad_rank, 1 if secondary else 0, date or '9999')
+
+    def _best_release_for_recording(self, recording_id: Optional[str]) -> Optional[str]:
+        """
+        Ask MusicBrainz for every release of a recording and return the ID of the
+        most likely original album. Returns None when nothing usable comes back.
+        """
+        if not recording_id:
+            return None
+
+        data = self._api_call(
+            f"{self.mb_base}/recording/{recording_id}",
+            params={'fmt': 'json', 'inc': 'releases+release-groups'},
+            rate_limit=self.RATE_LIMIT_MB
+        )
+        if not data:
+            return None
+
+        best = None
+        best_key = None
+        for rel in data.get('releases', []):
+            rg = rel.get('release-group') or {}
+            key = self._release_sort_key(
+                rg.get('primary-type'),
+                rg.get('secondary-types', []),
+                rg.get('first-release-date') or rel.get('date') or ''
+            )
+            if best_key is None or key < best_key:
+                best_key = key
+                best = rel
+
+        if best:
+            self.logger.debug(f"Chosen release: {best.get('title')} ({best_key})")
+            return best.get('id')
+        return None
+
     def search_musicbrainz(self, artist: str, title: str) -> Optional[Dict]:
         """Search MusicBrainz by artist and title when AcoustID fails"""
         try:
-            clean_artist = re.sub(r'[\(\[].*?[\)\]]', '', artist).strip()
-            clean_title = re.sub(r'[\(\[].*?[\)\]]', '', title).strip()
+            clean_artist = self._strip_noise(artist)
+            clean_title = self._strip_noise(title)
             
-            query = f'artist:"{clean_artist}" AND recording:"{clean_title}"'
+            if clean_artist and clean_artist.lower() != 'unknown artist':
+                query = f'artist:"{clean_artist}" AND recording:"{clean_title}"'
+            else:
+                query = f'recording:"{clean_title}"'
             params = {
                 'fmt': 'json',
                 'query': query,
@@ -392,7 +471,7 @@ class MusicTagger:
                 if releases:
                     return {
                         'recording_id': best_match.get('id'),
-                        'release_id': releases[0].get('id'),
+                        'release_id': self._best_release_for_recording(best_match.get('id')) or releases[0].get('id'),
                         'title': best_match.get('title'),
                         'artist': best_match.get('artist-credit', [{}])[0].get('name', '') if best_match.get('artist-credit') else ''
                     }
@@ -479,7 +558,7 @@ class MusicTagger:
         
         try:
             resp = self.session.get("https://api.genius.com/search", 
-                                   params={"q": f"{artist} {clean_title}"}, 
+                                   params={"q": clean_title if artist == "Unknown Artist" else f"{artist} {clean_title}"},
                                    headers=headers, timeout=3)
             resp.raise_for_status()
             hits = resp.json().get("response", {}).get("hits", [])
@@ -510,10 +589,19 @@ class MusicTagger:
                     best_score = score
                     best_match = result
             
-            if not best_match:
-                best_match = hits[0]["result"]
+            if not best_match or best_score < 3:
+                self.logger.debug(f"Genius result rejected (score {best_score})")
+                return None
             
             self.logger.debug(f"Best Genius match: {best_match.get('title')} by {best_match.get('primary_artist', {}).get('name')} (score: {best_score})")
+            found_artist = (best_match.get("primary_artist", {}).get("name") or "").casefold()
+            wanted = artist.casefold()
+            if wanted != "unknown artist" and not (
+                wanted in found_artist or found_artist in wanted
+                or set(re.findall(r'\w+', wanted)) & set(re.findall(r'\w+', found_artist))
+            ):
+                self.logger.debug(f"Genius artist mismatch: wanted '{artist}', got '{found_artist}'")
+                return None
             song_api_url = best_match["api_path"]
         except Exception as e:
             self.logger.debug(f"Genius search error: {e}")
@@ -648,72 +736,101 @@ class MusicTagger:
         
         return []
 
-    def _read_existing_tags(self, filepath: str) -> Tuple[Optional[str], Optional[str]]:
-        """Read artist/title directly from the file's own tags, if both are present"""
+    def _strip_noise(self, text: str) -> str:
+        """Remove (Official Video), [Lyrics], (Original) and similar noise from a title"""
+        cleaned = self.NOISE_BRACKET_RE.sub(' ', text or '')
+        return ' '.join(cleaned.split()).strip(' -~|')
+
+    def _primary_artist(self, artist: str) -> str:
+        """'Pusat & Beta' -> 'Pusat', 'Artist feat. X' -> 'Artist'"""
+        first = self.ARTIST_JOIN_RE.split(artist, maxsplit=1)[0].strip()
+        return first or artist
+
+    def _clean_channel(self, name: Optional[str]) -> Optional[str]:
+        """'Artist - Topic' and 'ArtistVEVO' -> 'Artist'"""
+        if not name:
+            return None
+        return self.CHANNEL_SUFFIX_RE.sub('', name).strip() or None
+
+    def parse_artist_title(self, raw: str) -> Optional[Tuple[str, str]]:
+        """Split 'Artist - Title' style strings. Returns None when no separator is found."""
+        text = self._strip_noise(raw)
+        parts = self.TITLE_SEPARATOR_RE.split(text, maxsplit=1)
+        if len(parts) == 2 and parts[0].strip() and parts[1].strip():
+            return parts[0].strip(), parts[1].strip()
+        return None
+
+    def _read_tag_pair(self, filepath: str) -> Tuple[Optional[str], Optional[str]]:
+        """Read artist and title tags as they are; either may be None"""
         try:
             audio = MutagenFile(filepath, easy=True)
         except Exception as e:
             self.logger.debug(f"Could not read existing tags: {e}")
             return None, None
-
         if not audio:
             return None, None
 
-        artist_list = audio.get('artist')
-        title_list = audio.get('title')
+        def first(key: str) -> Optional[str]:
+            values = audio.get(key)
+            return values[0].strip() if values and values[0].strip() else None
 
-        artist = artist_list[0].strip() if artist_list and artist_list[0].strip() else None
-        title = title_list[0].strip() if title_list and title_list[0].strip() else None
+        return first('artist'), first('title')
 
-        if artist and title:
-            return artist, title
-        return None, None
-
-    def _guess_artist_from_path(self, filepath: str) -> str:
+    def _build_search_candidates(self, filepath: str) -> List[Tuple[str, str]]:
         """
-        Infer the artist from the directory hierarchy when the filename alone
-        has no 'Artist - Title' separator. Standard layout is
-        Artist/Album/Track, so the artist is two levels up whenever that
-        level exists; falls back to the immediate parent for a flat
-        Artist/Track layout with no album folder.
+        Ordered (artist, title) guesses for the search fallbacks. Earlier entries
+        are tried first, later ones only when the earlier ones find nothing.
         """
-        parent_dir = os.path.dirname(filepath)
-        grandparent_dir = os.path.dirname(parent_dir)
+        tag_artist, tag_title = self._read_tag_pair(filepath)
+        base = re.sub(r'^\d+[\s\.\-_]+', '', os.path.splitext(os.path.basename(filepath))[0]).strip()
+        raw_title = tag_title or base
+        channel_artist = self._clean_channel(tag_artist) or self._guess_artist_from_path(filepath)
+        if channel_artist and channel_artist.casefold() in self.NON_ARTIST_NAMES:
+            channel_artist = None
 
-        parent = os.path.basename(parent_dir)
-        grandparent = os.path.basename(grandparent_dir)
+        candidates: List[Tuple[str, str]] = []
+        seen = set()
 
-        if grandparent and grandparent_dir not in (os.sep, ''):
-            return grandparent.strip() or "Unknown Artist"
+        def add(artist: str, title: str) -> None:
+            title = self._strip_noise(title) or title.strip()
+            if self.NON_SONG_TITLE_RE.search(title):
+                return
+            artist = (artist or '').strip()
+            if not artist or artist.casefold() in self.NON_ARTIST_NAMES:
+                artist = 'Unknown Artist'
+            key = (artist.lower(), title.lower())
+            if title and key not in seen:
+                seen.add(key)
+                candidates.append((artist, title))
 
-        return parent.strip() or "Unknown Artist"
+        parsed = self.parse_artist_title(raw_title)
+        if parsed:
+            artist, title = parsed
+            add(artist, title)
+            add(self._primary_artist(artist), title)
+            if tag_artist:
+                # Covers real titles that contain a dash, e.g. "Song - Remix"
+                add(channel_artist, raw_title)
+        else:
+            add(channel_artist, raw_title)
 
-    def _extract_search_guesses(self, filepath: str) -> Tuple[str, str]:
-        """
-        Two-tier artist/title guess used before AcoustID/MusicBrainz/Genius search.
+        return candidates or [('Unknown Artist', raw_title or base)]
 
-        Tier 1: if the file already carries artist+title tags (re-tagging an
-        already-organized library), use them directly - no filename/path parsing.
-        Tier 2: otherwise parse the filename, stripping a leading track number,
-        splitting on ' - ' when present, and falling back to the directory
-        hierarchy for the artist when it isn't.
-        """
-        existing_artist, existing_title = self._read_existing_tags(filepath)
-        if existing_artist and existing_title:
-            self.logger.debug(f"Using existing tags: '{existing_artist}' - '{existing_title}'")
-            return existing_artist, existing_title
+    def _genius_fallback(self, filepath: str, candidates: List[Tuple[str, str]]) -> bool:
+        """Try Genius with each candidate in order and tag from the first hit"""
+        for cand_artist, cand_title in candidates:
+            genius_data = self.search_genius(cand_artist, cand_title)
+            if genius_data:
+                metadata = self._build_genius_metadata(genius_data, cand_artist, cand_title)
+                covers = self._fetch_genius_covers(genius_data, metadata['artist'], metadata['title'])
+                self.logger.info(f"Genius: {metadata['artist']} - {metadata['title']} ({metadata.get('album', 'N/A')})")
+                metadata = self._normalize_metadata(metadata)
+                success = self.tag_file(filepath, metadata, covers)
+                self.logger.info(f"{'[OK]' if success else '[FAIL]'} {os.path.basename(filepath)}")
+                return success
 
-        filename = os.path.basename(filepath)
-        base_name = os.path.splitext(filename)[0]
-        cleaned = re.sub(r'^\d+[\s\.\-_]+', '', base_name).strip()
-
-        if ' - ' in cleaned:
-            artist_guess, title_guess = cleaned.split(' - ', 1)
-            return artist_guess.strip() or "Unknown Artist", title_guess.strip() or cleaned
-
-        title_guess = cleaned or base_name
-        artist_guess = self._guess_artist_from_path(filepath)
-        return artist_guess, title_guess
+        self.logger.error("No metadata found from any source")
+        return False
 
     def _locate_track_in_media(self, media: List[Dict], target_recording_id: Optional[str], title: str) -> Optional[Dict]:
         """
@@ -890,7 +1007,7 @@ class MusicTagger:
                     return [(res.content, res.headers.get('Content-Type', 'image/jpeg'))]
             except Exception:
                 pass
-        
+
         return self.get_cover_art('', None, artist, title)
 
     def tag_file(self, filepath: str, metadata: Dict, covers: List[Tuple[bytes, str]]) -> bool:
@@ -1096,21 +1213,21 @@ class MusicTagger:
         except Exception as e:
             self.logger.error(f"M4A save failed: {e}")
             return False
-
     def process_file(self, filepath: str) -> bool:
         """Main entry point: tag a single audio file with multi-source fallback"""
         filename = os.path.basename(filepath)
         ext = os.path.splitext(filepath)[1].lower()
-        
+
         if ext not in self.SUPPORTED_FORMATS:
             self.logger.error(f"Unsupported format: {ext}")
             return False
-        
+
         self.logger.info(f"Processing: {filename}")
-        
-        artist_guess, title_guess = self._extract_search_guesses(filepath)
-        self.logger.debug(f"Search guess: artist='{artist_guess}', title='{title_guess}'")
-        
+
+        candidates = self._build_search_candidates(filepath)
+        self.logger.debug(f"Search candidates: {candidates}")
+        artist_guess, title_guess = candidates[0]
+
         # Step 1: Try AcoustID + MusicBrainz
         acoustid_result = self.lookup_acoustid(filepath) if self.use_acoustid else None
         release_id = None
@@ -1120,20 +1237,15 @@ class MusicTagger:
         if acoustid_result:
             score = acoustid_result.get('score', 0) * 100
             self.logger.info(f"AcoustID match: {score:.1f}%")
-            
+
             recordings = acoustid_result.get('recordings', [])
             if recordings:
                 for rec in recordings:
                     recording_id = rec.get('id')
-                    for rg in rec.get('releasegroups', []):
-                        releases = rg.get('releases', [])
-                        if releases:
-                            release_id = releases[0]['id']
-                            break
+                    release_id = self._best_release_for_recording(recording_id)
                     if release_id:
                         break
-        
-        # Step 2: If AcoustID failed, try MusicBrainz text search
+        # Step 2: MusicBrainz text search, one candidate at a time
         if not release_id and self.use_mb_search:
             if acoustid_result:
                 self.logger.warning("AcoustID found but no release - trying MusicBrainz search")
@@ -1141,33 +1253,29 @@ class MusicTagger:
                 self.logger.warning("No AcoustID match - trying MusicBrainz search")
             else:
                 self.logger.info("AcoustID disabled - trying MusicBrainz search")
-            
-            mb_search = self.search_musicbrainz(artist_guess, title_guess)
-            if mb_search:
-                from_search = True
-                release_id = mb_search.get('release_id')
-                recording_id = mb_search.get('recording_id')
-                artist_guess = mb_search.get('artist', artist_guess)
-                title_guess = mb_search.get('title', title_guess)
-        
-        # Step 3: If still no MusicBrainz data, fall back to Genius only
+
+            mb_search = None
+            for cand_artist, cand_title in candidates:
+                variants = [cand_title]
+                bare = re.sub(r'\s*[\(\[\{].*?[\)\]\}]\s*', ' ', cand_title).strip()
+                if bare and bare != cand_title:
+                    variants.append(bare)
+                for variant in variants:
+                    mb_search = self.search_musicbrainz(cand_artist, variant)
+                    if mb_search:
+                        break
+                if mb_search:
+                    from_search = True
+                    release_id = mb_search.get('release_id')
+                    recording_id = mb_search.get('recording_id')
+                    artist_guess = mb_search.get('artist') or cand_artist
+                    title_guess = mb_search.get('title') or variant
+                    break
+
+        # Step 3: No MusicBrainz data, Genius only
         if not release_id:
             self.logger.warning("No MusicBrainz data - trying Genius fallback")
-            genius_data = self.search_genius(artist_guess, title_guess)
-            if genius_data:
-                metadata = self._build_genius_metadata(genius_data, artist_guess, title_guess)
-                covers = self._fetch_genius_covers(genius_data, metadata['artist'], metadata['title'])
-                
-                self.logger.info(f"Genius: {metadata['artist']} - {metadata['title']} ({metadata.get('album', 'N/A')})")
-                
-                metadata = self._normalize_metadata(metadata)
-
-                success = self.tag_file(filepath, metadata, covers)
-                self.logger.info(f"{'[OK]' if success else '[FAIL]'} {filename}")
-                return success
-
-            self.logger.error("No metadata found from any source")
-            return False
+            return self._genius_fallback(filepath, candidates)
 
         # Step 4: Fetch full release data from MusicBrainz
         self.logger.info("Fetching MusicBrainz metadata...")
@@ -1177,39 +1285,29 @@ class MusicTagger:
             timeout=15,
             rate_limit=self.RATE_LIMIT_MB
         )
-        
+
         if not release_data:
             self.logger.error("MusicBrainz fetch failed - falling back to Genius")
-            genius_data = self.search_genius(artist_guess, title_guess)
-            if genius_data:
-                metadata = self._build_genius_metadata(genius_data, artist_guess, title_guess)
-                covers = self._fetch_genius_covers(genius_data, metadata['artist'], metadata['title'])
-                
-                metadata = self._normalize_metadata(metadata)
+            return self._genius_fallback(filepath, candidates)
 
-                return self.tag_file(filepath, metadata, covers)
-            return False
-        
-        # Extract metadata
         if acoustid_result and acoustid_result.get('recordings') and not from_search:
             metadata = self._extract_musicbrainz_metadata(acoustid_result, release_data, target_rec_id=recording_id)
         else:
             metadata = self._extract_musicbrainz_from_search(release_data, recording_id, artist_guess, title_guess)
-        
+
         artist_name = metadata.get('artist', artist_guess)
         track_title = metadata.get('title', title_guess)
-        
+
         self.logger.info(f"Found: {artist_name} - {track_title} ({metadata.get('album', 'N/A')})")
-        
+
         rg_id = metadata.get('musicbrainz_releasegroupid') or release_data.get('release-group', {}).get('id')
         covers = self.get_cover_art(release_id, rg_id, artist_name, track_title)
-        
+
         if covers:
             self.logger.info(f"Cover art fetched ({len(covers)} image(s))")
         else:
             self.logger.warning("No cover art found")
 
-        # Uniform metadata normalization before tagging
         metadata = self._normalize_metadata(metadata)
 
         success = self.tag_file(filepath, metadata, covers)
