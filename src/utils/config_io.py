@@ -7,7 +7,7 @@ import logging
 import os
 
 try:
-    from ..config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG
+    from .config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG
 except ImportError:
     from config import CONFIG_DIR, CONFIG_FILE, DEFAULT_CONFIG
 
