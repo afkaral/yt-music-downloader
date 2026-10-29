@@ -24,8 +24,8 @@ from utils import load_config, save_config, get_library_path
 from core.tagger import MusicTagger
 from core.organizer import MusicOrganizer
 
-if getattr(sys, 'frozen', False):
-    app_dir = str(Path(sys.executable).parent)
+if getattr(sys, 'frozen', False) or '__compiled__' in globals():
+    app_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
     os.environ["PATH"] = app_dir + os.pathsep + os.environ.get("PATH", "")
 
 def get_version():
@@ -226,7 +226,7 @@ def cmd_download(args, config, logger):
         "--fragment-retries", "10",
         "--retry-sleep", "5",
         "-c",
-        "extractor-args", "youtube:player_client=android,ios,web",
+        "--extractor-args", "youtube:player_client=android,ios,web",
         "--geo-bypass",
         "-o", str(download_path / "%(title)s.%(ext)s"),
         args.url
