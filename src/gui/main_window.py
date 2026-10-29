@@ -17,7 +17,7 @@ from PySide6.QtGui import QIcon
 from PySide6.QtCore import Qt
 
 try:
-    from ..utils import load_config, save_config, find_downloaded_file, get_library_path
+    from .utils import load_config, save_config, find_downloaded_file, get_library_path
     from .player_widget import AudioPlayerWidget
     from .workers import (
         SearchThread,
