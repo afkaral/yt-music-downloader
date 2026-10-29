@@ -117,8 +117,8 @@ class MusicTagger:
 
     # Release secondary types that mean "not the original album"
     NON_ORIGINAL_RELEASE_TYPES = {
-        'compilation', 'mixtape/street', 'live', 'remix', 'dj-mix', 'djmix',
-        'demo', 'interview', 'spokenword', 'audio drama', 'karaoke',
+        'compilation', 'mixtape/street', 'live', 'remix', 'dj-mix', 'djmix', 'best',
+        'demo', 'interview', 'spokenword', 'audio drama', 'karaoke', 'great', 'top', 'bonus',
     }
 
     # Titles that signal a list, chart, schedule or guide rather than a song

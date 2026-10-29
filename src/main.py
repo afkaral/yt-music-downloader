@@ -221,6 +221,13 @@ def cmd_download(args, config, logger):
         "--embed-thumbnail",
         "--embed-metadata",
         "--no-playlist",
+        "--concurrent-fragments", "5",
+        "-R", "10",
+        "--fragment-retries", "10",
+        "--retry-sleep", "5",
+        "-c",
+        "extractor-args", "youtube:player_client=android,ios,web",
+        "--geo-bypass",
         "-o", str(download_path / "%(title)s.%(ext)s"),
         args.url
     ]

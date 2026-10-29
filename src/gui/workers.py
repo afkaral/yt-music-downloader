@@ -50,6 +50,7 @@ class SearchThread(QThread):
         expr = f"{platform}{self.limit}:{self.query}"
         cmd = [
             "yt-dlp",
+            "--extractor-args", "youtube:player_client=android,ios,web",
             "--dump-json",
             f"--max-downloads={self.limit}",
             expr,

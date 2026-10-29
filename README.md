@@ -114,6 +114,26 @@ The config file is `~/.config/ytmusicdl/config.json`. Settings can be changed in
 - `genius_token` is needed for the Genius fallback; without it Genius is skipped. Get one at https://genius.com/api-clients.
 - With `organize_after_tag` on, the automatic M3U for the download folder is skipped, since the files leave that folder.
 
+Also, I recommend that you use these yt-dlp settings in `~/.config/yt-dlp/config`:
+
+```
+--concurrent-fragments 5
+-R 10
+--fragment-retries 10
+--retry-sleep 5
+
+-c
+
+--extractor-args "youtube:player_client=android,ios,web"
+
+--geo-bypass
+--embed-thumbnail
+--embed-metadata
+
+-i
+
+--cookies-from-browser chrome # Change "chrome" to your preferred browser
+```
 ## How tagging works
 
 1. The artist and title to search for come from the file's existing tags if both are present. Otherwise they are parsed from the filename (a leading track number is stripped, `Artist - Title` is split), and as a last resort the artist is taken from the folder name.
