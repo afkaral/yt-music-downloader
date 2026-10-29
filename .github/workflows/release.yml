@@ -73,10 +73,10 @@ jobs:
         run: |
           python -m nuitka \
             --standalone \
-            --disable-console \
+            --windows-console-mode=disable \
             --enable-plugin=pyside6 \
+            --include-package=src \
             --include-data-dir=assets=assets \
-            --include-data-dir=src=src \
             --output-dir=dist \
             --output-filename=MusicDownloader.exe \
             src/main.py
