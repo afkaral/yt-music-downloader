@@ -7,10 +7,10 @@ import os
 import json
 from pathlib import Path
 try:
-    from ..core.tagger import MusicTagger
-    from ..core.organizer import MusicOrganizer
-    from ..utils import get_library_path
-    from ..utils.system import _get_duration_ffprobe, _atomic_write
+    from .core.tagger import MusicTagger
+    from .core.organizer import MusicOrganizer
+    from .utils import get_library_path
+    from .utils.system import _get_duration_ffprobe, _atomic_write
 except ImportError:
     from core.tagger import MusicTagger
     from core.organizer import MusicOrganizer

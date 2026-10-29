@@ -11,7 +11,7 @@ from PySide6.QtCore import Qt, Signal, QObject
 import logging
 
 try:
-    from ..core.player import MpvPlayer, format_time
+    from .core.player import MpvPlayer, format_time
 except ImportError:
     from core.player import MpvPlayer, format_time
 
