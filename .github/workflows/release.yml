@@ -71,7 +71,7 @@ jobs:
       - name: Build Windows Executable with Nuitka
         shell: bash
         run: |
-          python -m nuitka \
+          PYTHONPATH=. python -m nuitka \
             --standalone \
             --windows-console-mode=disable \
             --enable-plugin=pyside6 \
@@ -79,8 +79,8 @@ jobs:
             --include-data-dir=assets=assets \
             --output-dir=dist \
             --output-filename=MusicDownloader.exe \
-            src/main.py
-
+            --main=src.main
+            
       - name: Download ffmpeg for Windows
         shell: powershell
         run: |
